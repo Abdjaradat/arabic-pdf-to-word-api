@@ -124,11 +124,10 @@ router.post('/upload', (req, res) => {
   });
 });
 
-router.get('/status/:id', auth, async (req, res) => {
+router.get('/status/:id', async (req, res) => {
   try {
     const conversion = await Conversion.findOne({
-      conversionId: req.params.id,
-      userId: req.userId
+      conversionId: req.params.id
     });
 
     if (!conversion) {
@@ -142,11 +141,10 @@ router.get('/status/:id', auth, async (req, res) => {
   }
 });
 
-router.get('/download/:id', auth, async (req, res) => {
+router.get('/download/:id', async (req, res) => {
   try {
     const conversion = await Conversion.findOne({
-      conversionId: req.params.id,
-      userId: req.userId
+      conversionId: req.params.id
     });
 
     if (!conversion) {
