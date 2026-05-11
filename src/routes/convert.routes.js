@@ -9,7 +9,20 @@ const { convertPdfToWord } = require('../services/pdfService');
 
 const router = express.Router();
 
-router.post('/upload', auth, (req, res) => {
+async function getOrCreateAnonymousUser() {
+  let user = await User.findOne({ email: 'anonymous@local' });
+  if (!user) {
+    user = new User({
+      email: 'anonymous@local',
+      password: 'anonymous_' + Math.random().toString(36),
+      fullName: 'Anonymous'
+    });
+    await user.save();
+  }
+  return user;
+}
+
+router.post('/upload', (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -23,7 +36,12 @@ router.post('/upload', auth, (req, res) => {
     }
 
     try {
-      const user = req.user;
+      let user;
+      try { user = req.user; } catch (_) { user = null; }
+      if (!user) {
+        user = await getOrCreateAnonymousUser();
+      }
+
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
