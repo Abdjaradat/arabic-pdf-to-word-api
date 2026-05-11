@@ -8,18 +8,49 @@ const {
 } = require('docx');
 const { v4: uuidv4 } = require('uuid');
 
+function convertWithLibreOffice(inputPath, outputDir) {
+  try {
+    const outputFileName = `${uuidv4()}.docx`;
+    const outputPath = path.join(outputDir, outputFileName);
+
+    const result = spawnSync('soffice', [
+      '--headless',
+      '--norestore',
+      '--nofirststartwizard',
+      '--convert-to', 'docx',
+      '--outdir', outputDir,
+      inputPath
+    ], { timeout: 120000 });
+
+    if (result.status === 0) {
+      const files = fs.readdirSync(outputDir)
+        .filter(f => f.endsWith('.docx'))
+        .sort((a, b) => fs.statSync(path.join(outputDir, b)).mtimeMs - fs.statSync(path.join(outputDir, a)).mtimeMs);
+
+      if (files.length > 0) {
+        const actualOutput = path.join(outputDir, files[0]);
+        if (actualOutput !== outputPath) {
+          fs.renameSync(actualOutput, outputPath);
+        }
+        const stats = fs.statSync(outputPath);
+        return { outputPath, outputFileName, method: 'libreoffice', fileSize: stats.size };
+      }
+    }
+  } catch (e) {
+    console.warn('LibreOffice failed:', e.message);
+  }
+  return null;
+}
+
 function extractWithPdftotext(inputPath) {
   try {
     const result = spawnSync('pdftotext', [
-      '-layout',
-      '-nopgbrk',
-      '-enc', 'UTF-8',
-      inputPath,
-      '-'
+      '-layout', '-nopgbrk', '-enc', 'UTF-8',
+      inputPath, '-'
     ], { timeout: 60000, maxBuffer: 50 * 1024 * 1024 });
 
     if (result.status === 0 && result.stdout && result.stdout.length > 0) {
-      return { text: result.stdout.toString('utf-8'), method: 'pdftotext' };
+      return result.stdout.toString('utf-8');
     }
   } catch (e) {
     console.warn('pdftotext failed:', e.message);
@@ -27,18 +58,15 @@ function extractWithPdftotext(inputPath) {
   return null;
 }
 
-function extractWithPdfParse(inputPath) {
+function countPdfPages(inputPath) {
   try {
-    const pdfBuffer = fs.readFileSync(inputPath);
-    return pdfParse(pdfBuffer).then(data => ({
-      text: data.text,
-      method: 'pdf-parse',
-      numpages: data.numpages
-    }));
-  } catch (e) {
-    console.warn('pdf-parse failed:', e.message);
-    return null;
-  }
+    const result = spawnSync('pdfinfo', [inputPath], { timeout: 10000 });
+    if (result.status === 0) {
+      const match = result.stdout.toString().match(/Pages:\s*(\d+)/i);
+      if (match) return parseInt(match[1]);
+    }
+  } catch (_) {}
+  return 1;
 }
 
 function isArabicText(text) {
@@ -52,29 +80,6 @@ function isArabicText(text) {
   return (arabicCount / totalChars) > 0.3;
 }
 
-function detectParagraphType(text, prevEmpty) {
-  const trimmed = text.trim();
-  if (!trimmed) return 'empty';
-  if (trimmed.length < 60 && prevEmpty &&
-      !trimmed.endsWith('.') && !trimmed.endsWith('؟') &&
-      !trimmed.endsWith('!') && !trimmed.endsWith('،')) {
-    return 'heading';
-  }
-  return 'body';
-}
-
-function createTextRun(text, isRtl, options = {}) {
-  return new TextRun({
-    text: text,
-    font: isRtl ? 'Traditional Arabic' : 'Arial',
-    size: options.size || 22,
-    bold: options.bold || false,
-    italics: options.italics || false,
-    color: options.color || '000000',
-    rtl: isRtl || false
-  });
-}
-
 function textToDocxContent(text, isRtl) {
   const rawLines = text.split('\n');
   const blocks = [];
@@ -85,7 +90,7 @@ function textToDocxContent(text, isRtl) {
     const line = rawLines[i];
     if (!line.trim()) {
       if (currentBlock.length > 0) {
-        blocks.push({ lines: currentBlock, type: detectParagraphType(currentBlock.join(' '), prevEmpty) });
+        blocks.push({ lines: currentBlock, type: 'body' });
         currentBlock = [];
       }
       prevEmpty = true;
@@ -95,17 +100,19 @@ function textToDocxContent(text, isRtl) {
     prevEmpty = false;
   }
   if (currentBlock.length > 0) {
-    blocks.push({ lines: currentBlock, type: detectParagraphType(currentBlock.join(' '), prevEmpty) });
+    blocks.push({ lines: currentBlock, type: 'body' });
   }
 
   const children = [];
 
   children.push(
     new Paragraph({
-      children: [createTextRun(
-        isRtl ? 'تم التحويل بواسطة Arabic PDF To Word' : 'Converted by Arabic PDF To Word',
-        isRtl, { size: 18, color: '888888' }
-      )],
+      children: [new TextRun({
+        text: isRtl ? 'تم التحويل بواسطة Arabic PDF To Word' : 'Converted by Arabic PDF To Word',
+        font: isRtl ? 'Traditional Arabic' : 'Arial',
+        size: 18, color: '888888',
+        rtl: isRtl || false
+      })],
       alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
       bidirectional: isRtl,
       spacing: { after: 400 }
@@ -113,29 +120,16 @@ function textToDocxContent(text, isRtl) {
   );
 
   for (const block of blocks) {
-    if (block.type === 'empty') continue;
-    const text = block.lines.join(' ').trim();
-
-    if (block.type === 'heading') {
-      children.push(
-        new Paragraph({
-          children: [createTextRun(text, isRtl, { size: 28, bold: true })],
-          heading: HeadingLevel.HEADING_1,
-          alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-          bidirectional: isRtl,
-          spacing: { before: 300, after: 200 }
-        })
-      );
-      continue;
-    }
-
     const runs = [];
     for (const line of block.lines) {
       const trimmed = line.trimRight();
       if (!trimmed) continue;
       const isLineArabic = isArabicText(trimmed);
-      runs.push(createTextRun(trimmed, isLineArabic || isRtl, {
-        size: trimmed.length < 20 ? 24 : 22
+      runs.push(new TextRun({
+        text: trimmed,
+        font: isLineArabic || isRtl ? 'Traditional Arabic' : 'Arial',
+        size: trimmed.length < 20 ? 24 : 22,
+        rtl: isLineArabic || isRtl || false
       }));
     }
     if (runs.length === 0) continue;
@@ -145,53 +139,66 @@ function textToDocxContent(text, isRtl) {
         children: runs,
         alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.JUSTIFIED,
         bidirectional: isRtl,
-        spacing: { after: 120, line: 360 },
-        tabStops: [{ type: TabStopType.RIGHT, position: isRtl ? 9350 : 0 }]
+        spacing: { after: 120, line: 360 }
       })
     );
   }
 
-  children.push(
-    new Paragraph({ children: [new PageBreak()], spacing: { before: 600 } })
-  );
-  children.push(
-    new Paragraph({
-      children: [createTextRun(
-        isRtl ? '— نهاية المستند —' : '— End of Document —',
-        isRtl, { size: 20, color: '999999' }
-      )],
-      alignment: AlignmentType.CENTER,
-      bidirectional: isRtl,
-      spacing: { before: 400 }
-    })
-  );
+  children.push(new Paragraph({ children: [new PageBreak()], spacing: { before: 600 } }));
+  children.push(new Paragraph({
+    children: [new TextRun({
+      text: isRtl ? '— نهاية المستند —' : '— End of Document —',
+      font: isRtl ? 'Traditional Arabic' : 'Arial',
+      size: 20, color: '999999',
+      rtl: isRtl || false
+    })],
+    alignment: AlignmentType.CENTER,
+    bidirectional: isRtl,
+    spacing: { before: 400 }
+  }));
 
   return children;
 }
 
-async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
-  const isRtl = language === 'ara';
-  const outputFileName = `${uuidv4()}.docx`;
-  const outputPath = path.join(outputDir, outputFileName);
+async function convertWithNode(inputPath, outputDir, isRtl) {
+  const text = extractWithPdftotext(inputPath);
 
-  let extracted = extractWithPdftotext(inputPath);
-  let pageCount = 1;
+  if (!text) {
+    try {
+      const pdfBuffer = fs.readFileSync(inputPath);
+      const pdfData = await pdfParse(pdfBuffer);
+      const outputFileName = `${uuidv4()}.docx`;
+      const outputPath = path.join(outputDir, outputFileName);
+      const children = textToDocxContent(pdfData.text, isRtl);
 
-  if (!extracted) {
-    const pdfData = await extractWithPdfParse(inputPath);
-    if (pdfData) {
-      extracted = pdfData;
-      pageCount = pdfData.numpages || 1;
+      const doc = new Document({
+        sections: [{
+          properties: {
+            page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } }
+          },
+          children
+        }]
+      });
+
+      const buffer = await Packer.toBuffer(doc);
+      fs.writeFileSync(outputPath, buffer);
+      return {
+        outputPath, outputFileName,
+        pageCount: pdfData.numpages || 1,
+        textLength: pdfData.text.length,
+        method: 'pdf-parse'
+      };
+    } catch (e) {
+      throw new Error('All conversion methods failed');
     }
   }
 
-  const text = extracted ? extracted.text : '(No text could be extracted from this PDF)';
-
+  const outputFileName = `${uuidv4()}.docx`;
+  const outputPath = path.join(outputDir, outputFileName);
   const children = textToDocxContent(text, isRtl);
+  const pageCount = countPdfPages(inputPath);
 
   const doc = new Document({
-    title: 'Converted Document',
-    description: 'Converted from PDF to Word',
     styles: {
       default: {
         document: {
@@ -206,11 +213,9 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
     },
     sections: [{
       properties: {
-        page: {
-          margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }
-        }
+        page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } }
       },
-      children: children
+      children
     }]
   });
 
@@ -218,11 +223,33 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   fs.writeFileSync(outputPath, buffer);
 
   return {
-    outputPath,
-    outputFileName,
+    outputPath, outputFileName,
     pageCount,
-    textLength: text.length
+    textLength: text.length,
+    method: 'pdftotext'
   };
+}
+
+async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
+  const isRtl = language === 'ara';
+
+  // 1. Try LibreOffice first — best layout preservation
+  const lo = convertWithLibreOffice(inputPath, outputDir);
+  if (lo) {
+    const pageCount = countPdfPages(inputPath);
+    console.log('LibreOffice conversion succeeded');
+    return {
+      outputPath: lo.outputPath,
+      outputFileName: lo.outputFileName,
+      pageCount,
+      textLength: lo.fileSize,
+      method: 'libreoffice'
+    };
+  }
+
+  // 2. Fall back to Node.js (pdftotext → pdf-parse)
+  console.log('LibreOffice not available, using Node.js converter');
+  return convertWithNode(inputPath, outputDir, isRtl);
 }
 
 module.exports = { convertPdfToWord };

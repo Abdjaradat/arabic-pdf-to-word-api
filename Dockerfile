@@ -2,8 +2,17 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install LibreOffice for layout-preserving PDF→DOCX conversion
+# + poppler-utils (pdftotext) for Arabic text extraction
+# + Tesseract OCR with Arabic for AI text verification
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends poppler-utils && \
+    apt-get install -y --no-install-recommends \
+      libreoffice-writer \
+      libreoffice-java-common \
+      poppler-utils \
+      tesseract-ocr \
+      tesseract-ocr-ara \
+      && \
     rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
