@@ -12,30 +12,36 @@ async function convertWithPython(inputPath, outputDir) {
   const scriptPath = path.join(__dirname, 'convert_pdf.py');
   if (!fs.existsSync(scriptPath)) return null;
 
-  const result = spawnSync('python3', [scriptPath, inputPath, outputDir], {
-    timeout: 300000,
-    maxBuffer: 50 * 1024 * 1024
-  });
+  const pythonCommands = [
+    '/opt/venv/bin/python3',
+    '/opt/venv/bin/python',
+    'python3',
+    'python'
+  ];
 
-  if (result.status === 0 && result.stdout.length > 0) {
+  for (const cmd of pythonCommands) {
     try {
-      return JSON.parse(result.stdout.toString().trim());
-    } catch (e) {
-      return null;
-    }
-  }
+      const result = spawnSync(cmd, [scriptPath, inputPath, outputDir], {
+        timeout: 300000,
+        maxBuffer: 50 * 1024 * 1024
+      });
 
-  // Try python (not python3) on some systems
-  const result2 = spawnSync('python', [scriptPath, inputPath, outputDir], {
-    timeout: 300000,
-    maxBuffer: 50 * 1024 * 1024
-  });
-
-  if (result2.status === 0 && result2.stdout.length > 0) {
-    try {
-      return JSON.parse(result2.stdout.toString().trim());
+      if (result.status === 0 && result.stdout && result.stdout.length > 0) {
+        try {
+          const data = JSON.parse(result.stdout.toString().trim());
+          if (data && !data.error) return data;
+        } catch (e) {
+          continue;
+        }
+      } else if (result.stderr && result.stderr.length > 0) {
+        const stderr = result.stderr.toString();
+        if (stderr.includes('No module named')) {
+          console.warn(`Python module missing for ${cmd}, trying next`);
+          continue;
+        }
+      }
     } catch (e) {
-      return null;
+      continue;
     }
   }
 
