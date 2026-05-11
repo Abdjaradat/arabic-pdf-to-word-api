@@ -37,13 +37,6 @@ const authLimiter = rateLimit({
 app.use('/api/v1/auth/login', authLimiter);
 app.use('/api/v1/auth/register', authLimiter);
 
-const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50,
-  message: { error: 'Too many uploads, please try again later.' }
-});
-app.use('/api/v1/convert/upload', uploadLimiter);
-
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/convert', convertRoutes);
 
