@@ -8,44 +8,37 @@ const {
 } = require('docx');
 const { v4: uuidv4 } = require('uuid');
 
-async function convertWithPython(inputPath, outputDir) {
-  const scriptPath = path.join(__dirname, 'convert_pdf.py');
-  if (!fs.existsSync(scriptPath)) return null;
+function extractWithPdftotext(inputPath) {
+  try {
+    const result = spawnSync('pdftotext', [
+      '-layout',
+      '-nopgbrk',
+      '-enc', 'UTF-8',
+      inputPath,
+      '-'
+    ], { timeout: 60000, maxBuffer: 50 * 1024 * 1024 });
 
-  const pythonCommands = [
-    '/opt/venv/bin/python3',
-    '/opt/venv/bin/python',
-    'python3',
-    'python'
-  ];
-
-  for (const cmd of pythonCommands) {
-    try {
-      const result = spawnSync(cmd, [scriptPath, inputPath, outputDir], {
-        timeout: 300000,
-        maxBuffer: 50 * 1024 * 1024
-      });
-
-      if (result.status === 0 && result.stdout && result.stdout.length > 0) {
-        try {
-          const data = JSON.parse(result.stdout.toString().trim());
-          if (data && !data.error) return data;
-        } catch (e) {
-          continue;
-        }
-      } else if (result.stderr && result.stderr.length > 0) {
-        const stderr = result.stderr.toString();
-        if (stderr.includes('No module named')) {
-          console.warn(`Python module missing for ${cmd}, trying next`);
-          continue;
-        }
-      }
-    } catch (e) {
-      continue;
+    if (result.status === 0 && result.stdout && result.stdout.length > 0) {
+      return { text: result.stdout.toString('utf-8'), method: 'pdftotext' };
     }
+  } catch (e) {
+    console.warn('pdftotext failed:', e.message);
   }
-
   return null;
+}
+
+function extractWithPdfParse(inputPath) {
+  try {
+    const pdfBuffer = fs.readFileSync(inputPath);
+    return pdfParse(pdfBuffer).then(data => ({
+      text: data.text,
+      method: 'pdf-parse',
+      numpages: data.numpages
+    }));
+  } catch (e) {
+    console.warn('pdf-parse failed:', e.message);
+    return null;
+  }
 }
 
 function isArabicText(text) {
@@ -62,7 +55,9 @@ function isArabicText(text) {
 function detectParagraphType(text, prevEmpty) {
   const trimmed = text.trim();
   if (!trimmed) return 'empty';
-  if (trimmed.length < 50 && prevEmpty && !trimmed.endsWith('.') && !trimmed.endsWith('؟') && !trimmed.endsWith('!')) {
+  if (trimmed.length < 60 && prevEmpty &&
+      !trimmed.endsWith('.') && !trimmed.endsWith('؟') &&
+      !trimmed.endsWith('!') && !trimmed.endsWith('،')) {
     return 'heading';
   }
   return 'body';
@@ -80,23 +75,15 @@ function createTextRun(text, isRtl, options = {}) {
   });
 }
 
-async function convertWithNode(inputPath, outputDir, language) {
-  const pdfBuffer = fs.readFileSync(inputPath);
-  const pdfData = await pdfParse(pdfBuffer);
-
-  const outputFileName = `${uuidv4()}.docx`;
-  const outputPath = path.join(outputDir, outputFileName);
-
-  const isRtl = language === 'ara';
-
-  const rawLines = pdfData.text.split('\n');
+function textToDocxContent(text, isRtl) {
+  const rawLines = text.split('\n');
   const blocks = [];
   let currentBlock = [];
   let prevEmpty = true;
 
   for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i].trim();
-    if (!line) {
+    const line = rawLines[i];
+    if (!line.trim()) {
       if (currentBlock.length > 0) {
         blocks.push({ lines: currentBlock, type: detectParagraphType(currentBlock.join(' '), prevEmpty) });
         currentBlock = [];
@@ -104,7 +91,7 @@ async function convertWithNode(inputPath, outputDir, language) {
       prevEmpty = true;
       continue;
     }
-    currentBlock.push(rawLines[i].trimEnd());
+    currentBlock.push(line.trimEnd());
     prevEmpty = false;
   }
   if (currentBlock.length > 0) {
@@ -116,7 +103,7 @@ async function convertWithNode(inputPath, outputDir, language) {
   children.push(
     new Paragraph({
       children: [createTextRun(
-        language === 'ara' ? 'تم التحويل بواسطة Arabic PDF To Word' : 'Converted by Arabic PDF To Word',
+        isRtl ? 'تم التحويل بواسطة Arabic PDF To Word' : 'Converted by Arabic PDF To Word',
         isRtl, { size: 18, color: '888888' }
       )],
       alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
@@ -144,7 +131,7 @@ async function convertWithNode(inputPath, outputDir, language) {
 
     const runs = [];
     for (const line of block.lines) {
-      const trimmed = line.trim();
+      const trimmed = line.trimRight();
       if (!trimmed) continue;
       const isLineArabic = isArabicText(trimmed);
       runs.push(createTextRun(trimmed, isLineArabic || isRtl, {
@@ -170,7 +157,7 @@ async function convertWithNode(inputPath, outputDir, language) {
   children.push(
     new Paragraph({
       children: [createTextRun(
-        language === 'ara' ? '— نهاية المستند —' : '— End of Document —',
+        isRtl ? '— نهاية المستند —' : '— End of Document —',
         isRtl, { size: 20, color: '999999' }
       )],
       alignment: AlignmentType.CENTER,
@@ -178,6 +165,29 @@ async function convertWithNode(inputPath, outputDir, language) {
       spacing: { before: 400 }
     })
   );
+
+  return children;
+}
+
+async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
+  const isRtl = language === 'ara';
+  const outputFileName = `${uuidv4()}.docx`;
+  const outputPath = path.join(outputDir, outputFileName);
+
+  let extracted = extractWithPdftotext(inputPath);
+  let pageCount = 1;
+
+  if (!extracted) {
+    const pdfData = await extractWithPdfParse(inputPath);
+    if (pdfData) {
+      extracted = pdfData;
+      pageCount = pdfData.numpages || 1;
+    }
+  }
+
+  const text = extracted ? extracted.text : '(No text could be extracted from this PDF)';
+
+  const children = textToDocxContent(text, isRtl);
 
   const doc = new Document({
     title: 'Converted Document',
@@ -210,29 +220,9 @@ async function convertWithNode(inputPath, outputDir, language) {
   return {
     outputPath,
     outputFileName,
-    pageCount: pdfData.numpages || 1,
-    textLength: pdfData.text.length
+    pageCount,
+    textLength: text.length
   };
-}
-
-async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
-  // Try Python converter first for better quality
-  try {
-    const pyResult = await convertWithPython(inputPath, outputDir);
-    if (pyResult && !pyResult.error) {
-      console.log('Python conversion succeeded');
-      return pyResult;
-    }
-    if (pyResult && pyResult.error) {
-      console.warn('Python conversion error:', pyResult.error);
-    }
-  } catch (e) {
-    console.warn('Python converter not available, falling back to Node.js:', e.message);
-  }
-
-  // Fall back to Node.js converter
-  console.log('Using Node.js converter');
-  return convertWithNode(inputPath, outputDir, language);
 }
 
 module.exports = { convertPdfToWord };
