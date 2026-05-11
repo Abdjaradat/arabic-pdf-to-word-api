@@ -49,8 +49,8 @@ router.post('/upload', (req, res) => {
         user.dailyConversionCount = 0;
       }
 
-      const freeLimit = 5;
-      if (!user.isPremium && user.dailyConversionCount >= freeLimit) {
+      const freeLimit = 9999;
+      if (!user.isPremium && user.email !== 'anonymous@local' && user.dailyConversionCount >= freeLimit) {
         fs.unlinkSync(req.file.path);
         return res.status(429).json({ error: 'Daily limit reached. Upgrade to premium.' });
       }
