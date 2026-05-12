@@ -32,6 +32,7 @@ const conversionSchema = new mongoose.Schema({
     type: String,
     default: 'ara'
   },
+  conversionMethod: String,
   errorMessage: String,
   progress: {
     type: Number,

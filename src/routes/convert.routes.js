@@ -90,6 +90,7 @@ router.post('/upload', (req, res) => {
           conversion.outputFileName = result.outputFileName;
           conversion.outputFilePath = result.outputPath;
           conversion.pageCount = result.pageCount;
+          conversion.conversionMethod = result.method;
           conversion.completedAt = new Date();
 
           const stats = fs.statSync(result.outputPath);
@@ -268,6 +269,7 @@ function formatConversion(conversion) {
     output_file_size: conversion.outputFileSize,
     page_count: conversion.pageCount,
     ocr_used: conversion.ocrUsed,
+    conversion_method: conversion.conversionMethod,
     error_message: conversion.errorMessage,
     language: conversion.language,
     created_at: conversion.createdAt,
