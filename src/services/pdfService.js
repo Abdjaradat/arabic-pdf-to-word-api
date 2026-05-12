@@ -110,6 +110,61 @@ async function convertWithAzure(inputPath, outputDir) {
   }
 }
 
+// ── Google Gemini API (مجاني وقوي، عربي متصل بشكل صحيح) ──
+async function convertWithGemini(inputPath, outputDir) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const { GoogleGenerativeAI, GoogleAIFileManager } = require('@google/generative-ai');
+    const fileManager = new GoogleAIFileManager(apiKey);
+
+    // Upload PDF to Gemini File API
+    const uploadResult = await fileManager.uploadFile(inputPath, {
+      mimeType: 'application/pdf',
+      displayName: path.basename(inputPath),
+    });
+
+    // Wait for file processing
+    let file = await fileManager.getFile(uploadResult.file.name);
+    let attempts = 0;
+    while (file.state === 'PROCESSING' && attempts < 30) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      file = await fileManager.getFile(uploadResult.file.name);
+      attempts++;
+    }
+    if (file.state !== 'ACTIVE') {
+      console.warn('Gemini file processing timed out or failed');
+      return null;
+    }
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const result = await model.generateContent([
+      { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
+      { text: 'Extract ALL text from this PDF exactly as it appears, preserving the original layout, paragraphs, line breaks, and sections. If the document contains Arabic text, make sure Arabic letters are properly connected and shaped (الحروف العربية متصلة بشكل صحيح وليست منفصلة). Return the complete text as plain text with original paragraph structure preserved.' }
+    ]);
+
+    const text = result.response.text();
+
+    const outputFileName = `${uuidv4()}.docx`;
+    const outputPath$1 = path.join(outputDir, outputFileName);
+    const children = textToDocxContent(text, true);
+    const doc = new Document({
+      sections: [{ properties: { page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children }]
+    });
+    const buffer = await Packer.toBuffer(doc);
+    fs.writeFileSync(outputPath$1, buffer);
+
+    console.log('Gemini AI conversion succeeded');
+    return { outputPath: outputPath$1, outputFileName, pageCount: countPdfPages(inputPath), textLength: text.length, method: 'gemini-ai' };
+  } catch (e) {
+    console.warn('Gemini conversion failed:', e.message);
+    return null;
+  }
+}
+
 // ── LibreOffice (يحافظ على التنسيق) ──
 function convertWithLibreOffice(inputPath, outputDir) {
   try {
@@ -249,11 +304,15 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const azure = await convertWithAzure(inputPath, outputDir);
   if (azure) return azure;
 
-  // 2. LibreOffice — يحافظ على التنسيق
+  // 2. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح، مجاني وقوي
+  const gemini = await convertWithGemini(inputPath, outputDir);
+  if (gemini) return gemini;
+
+  // 3. LibreOffice — يحافظ على التنسيق
   const lo = convertWithLibreOffice(inputPath, outputDir);
   if (lo) return lo;
 
-  // 3. pdftotext — استخراج النص العربي
+  // 4. pdftotext — استخراج النص العربي (fallback)
   console.log('Using Node.js converter (pdftotext → docx)');
   return convertWithNode(inputPath, outputDir, isRtl);
 }
