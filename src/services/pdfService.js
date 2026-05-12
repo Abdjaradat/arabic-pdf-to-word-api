@@ -116,7 +116,8 @@ async function convertWithGemini(inputPath, outputDir) {
   if (!apiKey) return null;
 
   try {
-    const { GoogleGenerativeAI, GoogleAIFileManager } = require('@google/generative-ai');
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const { GoogleAIFileManager } = require('@google/generative-ai/server');
     const fileManager = new GoogleAIFileManager(apiKey);
 
     // Upload PDF to Gemini File API
@@ -143,7 +144,7 @@ async function convertWithGemini(inputPath, outputDir) {
 
     const result = await model.generateContent([
       { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
-      { text: 'Extract ALL text from this PDF exactly as it appears, preserving the original layout, paragraphs, line breaks, and sections. If the document contains Arabic text, make sure Arabic letters are properly connected and shaped (الحروف العربية متصلة بشكل صحيح وليست منفصلة). Return the complete text as plain text with original paragraph structure preserved.' }
+      { text: 'Extract ALL text from this PDF exactly as it appears. Preserve the original layout, paragraphs, line breaks, and sections. Important: Arabic text MUST have properly connected letters (الحروف العربية متصلة بشكل صحيح وليست منفصلة). Return ONLY the extracted text with original paragraph structure. Do NOT add any explanations, introductions, or markdown formatting.' }
     ]);
 
     const text = result.response.text();
