@@ -110,44 +110,67 @@ async function convertWithAzure(inputPath, outputDir) {
   }
 }
 
-// ── Google Gemini API (مجاني وقوي، عربي متصل بشكل صحيح) ──
+// ── Google Gemini API (عبر REST - أسرع وأدق للعربي) ──
 async function convertWithGemini(inputPath, outputDir) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   try {
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const { GoogleAIFileManager } = require('@google/generative-ai/server');
-    const fileManager = new GoogleAIFileManager(apiKey);
+    // Convert ALL pages of PDF to PNG images using pdftoppm
+    const tempPrefix = path.join(outputDir, `gemini_${uuidv4()}`);
+    const pngResult = spawnSync('pdftoppm', [
+      '-png', '-r', '300', inputPath, tempPrefix
+    ], { timeout: 120000 });
 
-    // Upload PDF to Gemini File API
-    const uploadResult = await fileManager.uploadFile(inputPath, {
-      mimeType: 'application/pdf',
-      displayName: path.basename(inputPath),
+    if (pngResult.status !== 0) return null;
+
+    const imageFiles = fs.readdirSync(outputDir)
+      .filter(f => f.startsWith(path.basename(tempPrefix)) && f.endsWith('.png'))
+      .sort();
+
+    if (imageFiles.length === 0) return null;
+
+    // Build parts array: one image per page + final text prompt
+    const parts = [];
+    for (const imgFile of imageFiles) {
+      const imgPath = path.join(outputDir, imgFile);
+      const imgData = fs.readFileSync(imgPath).toString('base64');
+      parts.push({ inline_data: { mime_type: 'image/png', data: imgData } });
+    }
+    parts.push({ text: 'Extract ALL text from these images preserving paragraphs, line breaks, and sections. Arabic text MUST have properly connected letters (الحروف العربية متصلة وليست منفصلة). Return ONLY the extracted text in order, no explanations.' });
+
+    // Call Gemini REST API
+    const https = require('https');
+    const url = new URL(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`);
+
+    const text = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'generativelanguage.googleapis.com',
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            const extracted = parsed?.candidates?.[0]?.content?.parts?.map(p => p.text).join('\n') || '';
+            resolve(extracted);
+          } catch (e) { reject(e); }
+        });
+      });
+      req.on('error', reject);
+      req.write(JSON.stringify({ contents: [{ parts }] }));
+      req.end();
     });
 
-    // Wait for file processing
-    let file = await fileManager.getFile(uploadResult.file.name);
-    let attempts = 0;
-    while (file.state === 'PROCESSING' && attempts < 30) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      file = await fileManager.getFile(uploadResult.file.name);
-      attempts++;
-    }
-    if (file.state !== 'ACTIVE') {
-      console.warn('Gemini file processing timed out or failed');
-      return null;
+    // Cleanup temp images
+    for (const imgFile of imageFiles) {
+      try { fs.unlinkSync(path.join(outputDir, imgFile)); } catch (_) {}
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-
-    const result = await model.generateContent([
-      { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
-      { text: 'Extract ALL text from this PDF exactly as it appears. Preserve the original layout, paragraphs, line breaks, and sections. Important: Arabic text MUST have properly connected letters (الحروف العربية متصلة بشكل صحيح وليست منفصلة). Return ONLY the extracted text with original paragraph structure. Do NOT add any explanations, introductions, or markdown formatting.' }
-    ]);
-
-    const text = result.response.text();
+    if (!text) return null;
 
     const outputFileName = `${uuidv4()}.docx`;
     const outputPath$1 = path.join(outputDir, outputFileName);
@@ -305,13 +328,13 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const azure = await convertWithAzure(inputPath, outputDir);
   if (azure) return azure;
 
-  // 2. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح، مجاني وقوي
-  const gemini = await convertWithGemini(inputPath, outputDir);
-  if (gemini) return gemini;
-
-  // 3. LibreOffice — يحافظ على التنسيق
+  // 2. LibreOffice — يحافظ على التنسيق البصري (أفضل للحفاظ على الشكل)
   const lo = convertWithLibreOffice(inputPath, outputDir);
   if (lo) return lo;
+
+  // 3. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح
+  const gemini = await convertWithGemini(inputPath, outputDir);
+  if (gemini) return gemini;
 
   // 4. pdftotext — استخراج النص العربي (fallback)
   console.log('Using Node.js converter (pdftotext → docx)');
