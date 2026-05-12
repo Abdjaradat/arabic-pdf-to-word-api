@@ -324,17 +324,17 @@ async function convertWithNode(inputPath, outputDir, isRtl) {
 async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const isRtl = language === 'ara';
 
-  // 1. Azure AI (إذا كان مفتاح API موجود) — أدق وأحترافي
+  // 1. Azure AI (إذا كان مفتاح API موجود)
   const azure = await convertWithAzure(inputPath, outputDir);
   if (azure) return azure;
 
-  // 2. LibreOffice — يحافظ على التنسيق البصري (أفضل للحفاظ على الشكل)
-  const lo = convertWithLibreOffice(inputPath, outputDir);
-  if (lo) return lo;
-
-  // 3. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح
+  // 2. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح
   const gemini = await convertWithGemini(inputPath, outputDir);
   if (gemini) return gemini;
+
+  // 3. LibreOffice — يحافظ على التنسيق البصري
+  const lo = convertWithLibreOffice(inputPath, outputDir);
+  if (lo) return lo;
 
   // 4. pdftotext — استخراج النص العربي (fallback)
   console.log('Using Node.js converter (pdftotext → docx)');
