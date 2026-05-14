@@ -38,6 +38,11 @@ const conversionSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  step: {
+    type: String,
+    enum: ['reading', 'writing', 'formatting', 'done', null],
+    default: null
+  },
   originalFilePath: String,
   outputFilePath: String,
   completedAt: Date

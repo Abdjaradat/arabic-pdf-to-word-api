@@ -247,7 +247,7 @@ function countPdfPages(inputPath) {
 }
 
 function isArabicText(text) {
-  const arabicPattern = /[\u0600-\u06FF\u0750-\u077F]/;
+  const arabicPattern = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
   let arabicCount = 0;
   const totalChars = text.replace(/\s/g, '').length;
   if (totalChars === 0) return false;
@@ -321,22 +321,230 @@ async function convertWithNode(inputPath, outputDir, isRtl) {
   return { outputPath, outputFileName, pageCount, textLength: text.length, method: 'pdftotext' };
 }
 
+// ── RSWS Algorithm: Read → Store → Write → Style ──
+// اختراع: Read PDF, Store words+formatting, Write word-by-word into Word, Style each word
+function rswsReadPdf(inputPath) {
+  // Read: استخرج النص من PDF
+  try {
+    const result = spawnSync('pdftotext', [
+      '-layout', '-nopgbrk', '-enc', 'UTF-8', inputPath, '-'
+    ], { timeout: 60000, maxBuffer: 50 * 1024 * 1024 });
+    if (result.status === 0 && result.stdout && result.stdout.length > 0) {
+      return { text: result.stdout.toString('utf-8'), method: 'pdftotext' };
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function rswsStoreText(rawText) {
+  // Store: احفظ الكلمات وحدة وحدة مع معلوماتها
+  const paragraphs = [];
+  const rawParagraphs = rawText.split('\n');
+  let currentPara = [];
+
+  for (const line of rawParagraphs) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (currentPara.length > 0) {
+        paragraphs.push(currentPara.join(' ').replace(/\s+/g, ' '));
+        currentPara = [];
+      }
+      continue;
+    }
+    currentPara.push(trimmed);
+  }
+  if (currentPara.length > 0) {
+    paragraphs.push(currentPara.join(' ').replace(/\s+/g, ' '));
+  }
+
+  // Store each paragraph as words with metadata
+  const stored = [];
+  for (const para of paragraphs) {
+    if (!para) continue;
+    const words = para.split(/\s+/).filter(w => w.length > 0);
+    const paraArabic = isArabicText(para);
+    const wordInfos = words.map(w => ({
+      text: w,
+      font: paraArabic ? 'Traditional Arabic' : 'Arial',
+      size: paraArabic ? 22 : 20,
+      bold: false,
+      italic: false,
+      has_arabic: isArabicText(w),
+    }));
+    stored.push({
+      text: para,
+      words: wordInfos,
+      alignment: paraArabic ? AlignmentType.RIGHT : AlignmentType.JUSTIFIED,
+      has_arabic: paraArabic,
+    });
+  }
+  return stored;
+}
+
+async function rswsWriteStyle(stored, outputPath) {
+  // Write + Style: اكتب كلمة كلمة ونسقها
+  const children = [];
+
+  children.push(new Paragraph({
+    children: [new TextRun({
+      text: 'تم التحويل بواسطة Arabic PDF To Word (RSWS)',
+      font: 'Traditional Arabic', size: 16, color: '888888',
+      rtl: true
+    })],
+    alignment: AlignmentType.RIGHT,
+    bidirectional: true,
+    spacing: { after: 400 }
+  }));
+
+  for (const para of stored) {
+    const runs = [];
+    for (const word of para.words) {
+      runs.push(new TextRun({
+        text: word.text + ' ',
+        font: word.font,
+        size: word.size,
+        bold: word.bold,
+        italic: word.italic,
+        rtl: word.has_arabic || para.has_arabic,
+      }));
+    }
+    children.push(new Paragraph({
+      children: runs,
+      alignment: para.alignment,
+      bidirectional: para.has_arabic,
+      spacing: { after: 120, line: 360 }
+    }));
+  }
+
+  children.push(new Paragraph({
+    children: [new TextRun({
+      text: '— نهاية المستند —',
+      font: 'Traditional Arabic', size: 16, color: '999999', rtl: true
+    })],
+    alignment: AlignmentType.CENTER,
+    bidirectional: true,
+    spacing: { before: 400 }
+  }));
+
+  const doc = new Document({
+    sections: [{
+      properties: {
+        page: {
+          margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }
+        }
+      },
+      children
+    }]
+  });
+
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+}
+
+function countPdfPages(inputPath) {
+  try {
+    const result = spawnSync('pdfinfo', [inputPath], { timeout: 10000 });
+    if (result.status === 0) {
+      const match = result.stdout.toString().match(/Pages:\s*(\d+)/i);
+      if (match) return parseInt(match[1]);
+    }
+  } catch (_) {}
+  return 1;
+}
+
+async function convertWithRSWS(inputPath, outputDir) {
+  console.log('RSWS: Reading PDF...');
+  // Step 1: Read
+  const readResult = rswsReadPdf(inputPath);
+  if (!readResult) return null;
+
+  console.log('RSWS: Storing words...');
+  // Step 2: Store
+  const stored = await rswsStoreText(readResult.text);
+  if (stored.length === 0) return null;
+
+  const outputFileName = `${uuidv4()}.docx`;
+  const outputPath = path.join(outputDir, outputFileName);
+  const wordCount = stored.reduce((sum, p) => sum + p.words.length, 0);
+
+  console.log(`RSWS: Writing ${wordCount} words into Word...`);
+  // Step 3+4: Write & Style
+  await rswsWriteStyle(stored, outputPath);
+
+  const pageCount = countPdfPages(inputPath);
+  const stats = fs.statSync(outputPath);
+
+  console.log(`RSWS: Done → ${outputFileName}`);
+  return {
+    outputPath,
+    outputFileName,
+    pageCount,
+    textLength: readResult.text.length,
+    method: 'rsws',
+    outputFileSize: stats.size,
+  };
+}
+
+// ── Python PyMuPDF converter (بالنسبة للبيئة اللي فيها Python) ──
+function convertWithPython(inputPath, outputDir) {
+  try {
+    const scriptPath = path.join(__dirname, 'convert_pdf.py');
+    if (!fs.existsSync(scriptPath)) return null;
+
+    const result = spawnSync('python3', [scriptPath, inputPath, outputDir], {
+      timeout: 180000,
+      maxBuffer: 100 * 1024 * 1024
+    });
+
+    if (result.status !== 0) {
+      const result2 = spawnSync('python', [scriptPath, inputPath, outputDir], {
+        timeout: 180000,
+        maxBuffer: 100 * 1024 * 1024
+      });
+      if (result2.status !== 0) return null;
+      try {
+        const parsed = JSON.parse(result2.stdout.toString());
+        if (parsed.error) return null;
+        return parsed;
+      } catch (_) { return null; }
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout.toString());
+      if (parsed.error) return null;
+      return parsed;
+    } catch (_) { return null; }
+  } catch (e) {
+    console.warn('Python converter failed:', e.message);
+    return null;
+  }
+}
+
 async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const isRtl = language === 'ara';
 
-  // 1. Azure AI (إذا كان مفتاح API موجود)
+  // 1. RSWS Algorithm (Read → Store → Write → Style) ← الأساسي
+  console.log('Trying RSWS converter (Node.js)...');
+  const rsws = await convertWithRSWS(inputPath, outputDir);
+  if (rsws) return rsws;
+
+  // 2. Python PyMuPDF (إذا كان Python موجود)
+  const pyResult = convertWithPython(inputPath, outputDir);
+  if (pyResult) return pyResult;
+
+  // 3. Azure AI (إذا كان مفتاح API موجود)
   const azure = await convertWithAzure(inputPath, outputDir);
   if (azure) return azure;
 
-  // 2. Google Gemini (إذا كان مفتاح API موجود) — عربي متصل بشكل صحيح
+  // 4. Google Gemini (إذا كان مفتاح API موجود)
   const gemini = await convertWithGemini(inputPath, outputDir);
   if (gemini) return gemini;
 
-  // 3. LibreOffice — يحافظ على التنسيق البصري
+  // 5. LibreOffice — يحافظ على التنسيق البصري
   const lo = convertWithLibreOffice(inputPath, outputDir);
   if (lo) return lo;
 
-  // 4. pdftotext — استخراج النص العربي (fallback)
+  // 6. pdftotext — استخراج النص العربي (fallback)
   console.log('Using Node.js converter (pdftotext → docx)');
   return convertWithNode(inputPath, outputDir, isRtl);
 }

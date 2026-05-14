@@ -76,7 +76,14 @@ router.post('/upload', (req, res) => {
 
       setImmediate(async () => {
         try {
+          conversion.progress = 10;
+          conversion.step = 'reading';
+          await conversion.save();
+
+          // Step 1: Extract text
+          await new Promise(r => setTimeout(r, 500));
           conversion.progress = 30;
+          conversion.step = 'reading';
           await conversion.save();
 
           const result = await convertPdfToWord(
@@ -85,8 +92,15 @@ router.post('/upload', (req, res) => {
             req.body.language || 'ara'
           );
 
+          conversion.step = 'formatting';
+          conversion.progress = 70;
+          await conversion.save();
+
+          await new Promise(r => setTimeout(r, 300));
+
           conversion.status = 'completed';
           conversion.progress = 100;
+          conversion.step = 'done';
           conversion.outputFileName = result.outputFileName;
           conversion.outputFilePath = result.outputPath;
           conversion.pageCount = result.pageCount;
@@ -102,6 +116,7 @@ router.post('/upload', (req, res) => {
           conversion.status = 'failed';
           conversion.errorMessage = convError.message || 'Conversion failed';
           conversion.progress = 0;
+          conversion.step = null;
           await conversion.save();
         }
       });
@@ -274,7 +289,8 @@ function formatConversion(conversion) {
     language: conversion.language,
     created_at: conversion.createdAt,
     completed_at: conversion.completedAt,
-    progress: conversion.progress
+    progress: conversion.progress,
+    step: conversion.step
   };
 }
 
