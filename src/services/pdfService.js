@@ -495,23 +495,23 @@ async function convertWithRSWS(inputPath, outputDir) {
   };
 }
 
-// ── Recursive RSWS: RSWS → Word → PDF → RSWS → ... × 100 ──
-function convertWithPythonRecursive(inputPath, outputDir) {
+// ── Recursive RSWS: RSWS → Word → PDF → RSWS → ... × N ──
+function convertWithPythonRecursive(inputPath, outputDir, iterations = 100) {
   try {
     const scriptPath = path.join(__dirname, 'convert_pdf.py');
     if (!fs.existsSync(scriptPath)) return null;
 
-    console.log('Python recursive RSWS: 100 iterations...');
+    console.log(`Python recursive RSWS: ${iterations} iterations...`);
     const result = spawnSync('python3', [
-      scriptPath, '--recursive', inputPath, outputDir, '100'
+      scriptPath, '--recursive', inputPath, outputDir, String(iterations)
     ], {
-      timeout: 600000,  // 10 minutes for 100 iterations
+      timeout: Math.min(iterations * 6000, 600000),
       maxBuffer: 100 * 1024 * 1024
     });
 
     if (result.status !== 0) {
       const result2 = spawnSync('python', [
-        scriptPath, '--recursive', inputPath, outputDir, '100'
+        scriptPath, '--recursive', inputPath, outputDir, String(iterations)
       ], {
         timeout: 600000,
         maxBuffer: 100 * 1024 * 1024
@@ -575,10 +575,19 @@ function convertWithPython(inputPath, outputDir) {
 async function convertPdfToWord(inputPath, outputDir, language = 'ara', quality = 'normal') {
   const isRtl = language === 'ara';
 
-  // Quality modes: 'normal' (سريع) or 'high' (100 لوب)
+  // ثلاث مستويات:
+  //   normal  = RSWS مرة واحدة  (إعلان قصير)
+  //   high    = RSWS 50 مرة     (إعلان متوسط)
+  //   premium = RSWS 100 مرة    (إعلان طويل)
+  if (quality === 'premium') {
+    console.log('PREMIUM: Running recursive RSWS (100 iterations)...');
+    const recResult = convertWithPythonRecursive(inputPath, outputDir, 100);
+    if (recResult) return recResult;
+  }
+
   if (quality === 'high') {
-    console.log('HIGH QUALITY: Running recursive RSWS (100 iterations)...');
-    const recResult = convertWithPythonRecursive(inputPath, outputDir);
+    console.log('HIGH: Running recursive RSWS (50 iterations)...');
+    const recResult = convertWithPythonRecursive(inputPath, outputDir, 50);
     if (recResult) return recResult;
   }
 
