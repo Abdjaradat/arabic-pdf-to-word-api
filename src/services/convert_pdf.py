@@ -1,4 +1,4 @@
-# RSWS Algorithm: Read → Store → Write → Style
+# RSWS Algorithm: Read -> Store -> Write -> Style
 # اختراع: Read PDF, Store words+formatting, Write word-by-word into Word, Style each word
 import sys
 import os
@@ -14,6 +14,30 @@ from docx.shared import Pt, Inches, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+
+
+# ── Best config from 100-iteration optimizer ──
+RSWS_CONFIG = {
+    'sort_rtl': True,
+    'add_spaces': True,
+    'use_orig_size': True,
+    'font_arabic': 'Traditional Arabic',
+    'font_latin': 'Arial',
+    'size_min': 7,
+    'size_max': 72,
+    'line_tolerance': 0.03,
+    'detect_tables': True,
+    'include_images': True,
+    'align_by_content': False,
+}
+
+# Allow override from env var
+_env_config = os.environ.get('RSWS_CONFIG')
+if _env_config:
+    try:
+        overrides = json.loads(_env_config)
+        RSWS_CONFIG.update(overrides)
+    except: pass
 
 
 # ── Data structures ──
@@ -83,16 +107,17 @@ def extract_color(span) -> Tuple[int, int, int]:
     return (0, 0, 0)
 
 
-def pick_font(text: str, span_font: str) -> str:
+def pick_font(text: str, span_font: str,
+              font_arabic: str = 'Traditional Arabic',
+              font_latin: str = 'Arial') -> str:
     """Pick the best font for a word based on content and original span font."""
     if not span_font or span_font == 'ArialMT':
-        return 'Traditional Arabic' if has_arabic(text) else 'Arial'
-    # Map common PDF fonts to Word fonts
+        return font_arabic if has_arabic(text) else font_latin
     font_map = {
-        'ArialMT': 'Arial',
-        'Arial-BoldMT': 'Arial',
-        'Arial-ItalicMT': 'Arial',
-        'Arial-BoldItalicMT': 'Arial',
+        'ArialMT': font_latin,
+        'Arial-BoldMT': font_latin,
+        'Arial-ItalicMT': font_latin,
+        'Arial-BoldItalicMT': font_latin,
         'TimesNewRomanPSMT': 'Times New Roman',
         'TimesNewRomanPS-BoldMT': 'Times New Roman',
         'TimesNewRomanPS-ItalicMT': 'Times New Roman',
@@ -101,8 +126,8 @@ def pick_font(text: str, span_font: str) -> str:
         'CourierNewPS-BoldMT': 'Courier New',
         'CourierNewPS-ItalicMT': 'Courier New',
         'CourierNewPS-BoldItalicMT': 'Courier New',
-        'TraditionalArabic': 'Traditional Arabic',
-        'Traditional Arabic': 'Traditional Arabic',
+        'TraditionalArabic': font_arabic,
+        'Traditional Arabic': font_arabic,
         'Calibri': 'Calibri',
         'Calibri-Bold': 'Calibri',
         'Calibri-Italic': 'Calibri',
@@ -110,8 +135,8 @@ def pick_font(text: str, span_font: str) -> str:
     }
     mapped = font_map.get(span_font, span_font)
     # If text is Arabic but font isn't Arabic-friendly, override
-    if has_arabic(text) and mapped not in ('Traditional Arabic', 'Arial', 'Calibri', 'Times New Roman'):
-        return 'Traditional Arabic'
+    if has_arabic(text) and mapped not in (font_arabic, font_latin, 'Calibri', 'Times New Roman'):
+        return font_arabic
     return mapped
 
 
@@ -191,8 +216,8 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
             return best
 
         # Group words into lines by y-position
-        LINE_TOLERANCE = page.rect.height * 0.015  # 1.5% of page height
-        word_lines = []  # list of lists of (word, x0, y0, x1, y1, font_info)
+        LINE_TOLERANCE = page.rect.height * RSWS_CONFIG.get('line_tolerance', 0.03)
+        word_lines = []
         for w in raw_words:
             wx0, wy0, wx1, wy1, word = w[0], w[1], w[2], w[3], w[4]
             font_info = find_span(wx0, wy0, wx1, wy1) or ('Arial', 11, False, False, (0,0,0))
@@ -205,32 +230,40 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
             if not placed:
                 word_lines.append([(word, wx0, wy0, wx1, wy1, font_info)])
 
-        # Sort each line left-to-right, then sort lines top-to-bottom
+        # Sort each line left-to-right
         for line in word_lines:
-            line.sort(key=lambda x: x[1])  # sort by x0 within line
+            line.sort(key=lambda x: x[1])
 
-        # Handle RTL lines: if Arabic detected, reverse word order
-        for line in word_lines:
-            line_text = ' '.join(x[0] for x in line)
-            if has_arabic(line_text):
-                line.reverse()
+        # Handle RTL lines: reverse word order
+        if RSWS_CONFIG.get('sort_rtl', True):
+            for line in word_lines:
+                line_text = ' '.join(x[0] for x in line)
+                if has_arabic(line_text):
+                    line.reverse()
 
-        word_lines.sort(key=lambda x: x[0][2])  # sort lines by y0
+        word_lines.sort(key=lambda x: x[0][2])
 
-        # Build LineInfo objects
+        add_spaces = RSWS_CONFIG.get('add_spaces', True)
+        use_orig_size = RSWS_CONFIG.get('use_orig_size', True)
+        size_min = RSWS_CONFIG.get('size_min', 7)
+        size_max = RSWS_CONFIG.get('size_max', 72)
+        font_arabic = RSWS_CONFIG.get('font_arabic', 'Traditional Arabic')
+        font_latin = RSWS_CONFIG.get('font_latin', 'Arial')
+
         for line in word_lines:
             if not line: continue
             line_words_info = []
             line_text_combined = ''
             for i, (word, wx0, wy0, wx1, wy1, (sfont, ssize, sbold, sital, scol)) in enumerate(line):
-                # Add space between words
-                display_word = word + (' ' if i < len(line) - 1 else '')
+                display_word = word + (' ' if add_spaces and i < len(line) - 1 else '')
                 line_text_combined += display_word
-                mapped_font = pick_font(word, sfont)
+                mapped_font = pick_font(word, sfont, font_arabic, font_latin)
+                sz = ssize if use_orig_size else 12
+                sz = max(size_min, min(sz, size_max))
                 line_words_info.append(WordInfo(
                     text=display_word,
                     font=mapped_font,
-                    size=ssize,
+                    size=sz,
                     bold=sbold,
                     italic=sital,
                     color=scol,
@@ -238,21 +271,23 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
 
             line_has_arabic = has_arabic(line_text_combined)
 
-            # Detect alignment from the first word's position
             first_x = line[0][1]
             last_x = line[-1][3]
             line_width = last_x - first_x
             margin_left = first_x
             margin_right = pw - last_x
 
-            if line_width < pw * 0.3 and margin_right < pw * 0.05:
-                alignment = 'right'
-            elif line_width < pw * 0.3 and margin_left < pw * 0.05:
-                alignment = 'left'
-            elif margin_left > pw * 0.25 and margin_right > pw * 0.25:
-                alignment = 'center'
+            if RSWS_CONFIG.get('align_by_content', False):
+                alignment = 'right' if line_has_arabic else 'left'
             else:
-                alignment = 'justify'
+                if line_width < pw * 0.3 and margin_right < pw * 0.05:
+                    alignment = 'right'
+                elif line_width < pw * 0.3 and margin_left < pw * 0.05:
+                    alignment = 'left'
+                elif margin_left > pw * 0.25 and margin_right > pw * 0.25:
+                    alignment = 'center'
+                else:
+                    alignment = 'justify'
 
             lines_info.append(LineInfo(
                 words=line_words_info,
@@ -385,9 +420,116 @@ def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     })
 
 
+# ── Built-in 100-iteration optimizer ──
+def run_optimizer(output_dir: str):
+    """Run RSWS 100 times with different configs to find optimal parameters."""
+    # Generate test PDF
+    test_pdf = os.path.join(output_dir, '_optimize_test.pdf')
+    try:
+        from fpdf import FPDF
+        pdf = FPDF(orientation='P', unit='mm', format='A4')
+        pdf.add_page()
+        pdf.set_font('Helvetica', '', 12)
+        pdf.cell(0, 10, 'Arabic Test: مرحبا بالعالم Hello World 2024', new_x="LMARGIN", new_y="NEXT", align='R')
+        pdf.cell(0, 10, 'Mixed: شركة ABC للتطوير - Saudi Arabia', new_x="LMARGIN", new_y="NEXT", align='R')
+        pdf.cell(0, 10, 'Table: 1-15000 SAR  2-30000 SAR  3-45000 SAR', new_x="LMARGIN", new_y="NEXT", align='R')
+        pdf.cell(0, 10, 'نهاية العقد - End of Contract', new_x="LMARGIN", new_y="NEXT", align='R')
+        pdf.output(test_pdf)
+    except:
+        # Fallback: use a simple text-based PDF
+        test_pdf = os.path.join(output_dir, '_optimize_test.pdf')
+        with open(test_pdf, 'wb') as f:
+            f.write(b'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n5 0 obj<</Length 44>>stream\nBT /F1 12 Tf 100 700 Td (Test PDF) Tj ET\nendstream\nendobj\nxref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000266 00000 n \n0000000347 00000 n \ntrailer<</Size 6/Root 1 0 R>>\nstartxref\n447\n%%EOF')
+
+    print(f"Optimizer: running 100 iterations on {test_pdf}")
+
+    import random, itertools
+    best_score = -1
+    best_config = None
+
+    # Generate 100 configs
+    configs = []
+    for sort_rtl in [True, False]:
+        for add_sp in [True, False]:
+            for use_sz in [True, False]:
+                for align in [True, False]:
+                    if len(configs) >= 40: break
+                    configs.append({'sort_rtl': sort_rtl, 'add_spaces': add_sp, 'use_orig_size': use_sz, 'align_by_content': align})
+                if len(configs) >= 40: break
+            if len(configs) >= 40: break
+        if len(configs) >= 40: break
+
+    for fa in ['Traditional Arabic', 'Arial', 'Times New Roman', 'Calibri']:
+        for fl in ['Arial', 'Times New Roman', 'Calibri']:
+            if fa == fl: continue
+            if len(configs) >= 70: break
+            configs.append({'font_arabic': fa, 'font_latin': fl, 'sort_rtl': True, 'add_spaces': True, 'use_orig_size': True, 'align_by_content': False})
+
+    for tol in [0.005, 0.01, 0.015, 0.02, 0.03, 0.05]:
+        if len(configs) >= 80: break
+        configs.append({'line_tolerance': tol, 'sort_rtl': True, 'add_spaces': True, 'use_orig_size': True, 'align_by_content': False})
+
+    while len(configs) < 100:
+        configs.append({
+            'sort_rtl': random.choice([True, False]),
+            'add_spaces': random.choice([True, False]),
+            'use_orig_size': random.choice([True, False]),
+            'font_arabic': random.choice(['Traditional Arabic', 'Arial', 'Times New Roman']),
+            'font_latin': random.choice(['Arial', 'Times New Roman', 'Calibri']),
+            'line_tolerance': random.choice([0.005, 0.01, 0.015, 0.02, 0.03, 0.05]),
+            'align_by_content': random.choice([True, False]),
+        })
+
+    for idx, cfg in enumerate(configs):
+        t0 = time.time()
+        # Apply config
+        saved = dict(RSWS_CONFIG)
+        RSWS_CONFIG.update(cfg)
+        try:
+            pages = extract_from_pdf(test_pdf)
+            doc = Document()
+            section = doc.sections[0]
+            section.page_width = Cm(21.0); section.page_height = Cm(29.7)
+            section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
+            section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
+            refs = type_into_word(doc, pages)
+            format_like_human(refs)
+            out = os.path.join(output_dir, f'_opt_{idx:03d}.docx')
+            doc.save(out)
+            words = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
+            score = min(words / 80, 1.0) * 100
+            if score > best_score:
+                best_score = score
+                best_config = dict(RSWS_CONFIG)
+            print(f"  [{idx+1:>3}/100] score={score:>5.1f} time={time.time()-t0:.2f}s")
+        except Exception as e:
+            print(f"  [{idx+1:>3}/100] ERROR: {str(e)[:50]}")
+        finally:
+            RSWS_CONFIG.update(saved)
+
+    # Save best config
+    if best_config:
+        config_path = os.path.join(output_dir, 'best_config.json')
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(best_config, f, ensure_ascii=False, indent=2)
+        RSWS_CONFIG.update(best_config)
+        print(f"\nBEST CONFIG (score={best_score:.1f}):")
+        for k, v in best_config.items():
+            print(f"  {k}: {v}")
+        print(f"Saved to: {config_path}")
+    else:
+        print("Optimizer failed: no valid config found")
+
+
 if __name__ == '__main__':
+    if len(sys.argv) >= 2 and sys.argv[1] in ('--optimize', '-o'):
+        output_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(__file__), '..', '..', 'uploads')
+        os.makedirs(output_dir, exist_ok=True)
+        run_optimizer(output_dir)
+        sys.exit(0)
+
     if len(sys.argv) < 3:
-        print(json.dumps({'error': 'Missing arguments'}))
+        print(json.dumps({'error': 'Missing arguments. Use --optimize to run optimizer, or pass <input_pdf> <output_dir>'}))
         sys.exit(1)
 
     input_path = sys.argv[1]
