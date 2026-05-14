@@ -336,8 +336,19 @@ function rswsReadPdf(inputPath) {
   return null;
 }
 
+function detectWordFont(word) {
+  return isArabicText(word) ? 'Traditional Arabic' : 'Arial';
+}
+
+function detectWordSize(word) {
+  const len = word.replace(/\s/g, '').length;
+  if (len <= 2) return 20;
+  if (len <= 6) return 22;
+  if (len <= 12) return 26;
+  return 28;
+}
+
 async function rswsStoreText(rawText) {
-  // Store: احفظ الكلمات وحدة وحدة مع معلوماتها
   const paragraphs = [];
   const rawParagraphs = rawText.split('\n');
   let currentPara = [];
@@ -357,7 +368,6 @@ async function rswsStoreText(rawText) {
     paragraphs.push(currentPara.join(' ').replace(/\s+/g, ' '));
   }
 
-  // Store each paragraph as words with metadata
   const stored = [];
   for (const para of paragraphs) {
     if (!para) continue;
@@ -365,8 +375,8 @@ async function rswsStoreText(rawText) {
     const paraArabic = isArabicText(para);
     const wordInfos = words.map(w => ({
       text: w,
-      font: paraArabic ? 'Traditional Arabic' : 'Arial',
-      size: paraArabic ? 22 : 20,
+      font: detectWordFont(w),
+      size: detectWordSize(w),
       bold: false,
       italic: false,
       has_arabic: isArabicText(w),
@@ -523,14 +533,15 @@ function convertWithPython(inputPath, outputDir) {
 async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const isRtl = language === 'ara';
 
-  // 1. RSWS Algorithm (Read → Store → Write → Style) ← الأساسي
-  console.log('Trying RSWS converter (Node.js)...');
-  const rsws = await convertWithRSWS(inputPath, outputDir);
-  if (rsws) return rsws;
-
-  // 2. Python PyMuPDF (إذا كان Python موجود)
+  // 1. Python PyMuPDF RSWS (الأفضل — يستخرج التنسيق الأصلي)
+  console.log('Trying Python RSWS converter (PyMuPDF)...');
   const pyResult = convertWithPython(inputPath, outputDir);
   if (pyResult) return pyResult;
+
+  // 2. Node.js RSWS (pdftotext — احتياطي بدون تنسيق)
+  console.log('Trying Node.js RSWS converter (pdftotext)...');
+  const rsws = await convertWithRSWS(inputPath, outputDir);
+  if (rsws) return rsws;
 
   // 3. Azure AI (إذا كان مفتاح API موجود)
   const azure = await convertWithAzure(inputPath, outputDir);

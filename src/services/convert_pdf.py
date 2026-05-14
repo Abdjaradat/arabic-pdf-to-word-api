@@ -5,8 +5,8 @@ import os
 import json
 import uuid
 import time
-from dataclasses import dataclass, field
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 import fitz
 from docx import Document
@@ -36,29 +36,24 @@ class LineInfo:
     x: float
 
 @dataclass
-class TableInfo:
-    rows: List[List[str]]
-    has_arabic: bool
-
-@dataclass
-class ImageInfo:
-    png_bytes: bytes
-    width_in: float
-    height_in: float
-
-@dataclass
 class PageInfo:
     lines: List[LineInfo]
-    tables: List[TableInfo]
-    images: List[ImageInfo]
+    images: List  # list of (png_bytes, w_in, h_in)
 
 
 # ── Helpers ──
 
+ARABIC_RANGES = [
+    (0x0600, 0x06FF),  # Arabic
+    (0x0750, 0x077F),  # Arabic Supplement
+    (0x08A0, 0x08FF),  # Arabic Extended-A
+    (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
+    (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
+    (0x0600, 0x06FF),  # (dup for clarity)
+]
+
 def has_arabic(text: str) -> bool:
-    return any('\u0600' <= c <= '\u06FF' or '\u0750' <= c <= '\u077F'
-               or '\u08A0' <= c <= '\u08FF' or '\uFB50' <= c <= '\uFDFF'
-               or '\uFE70' <= c <= '\uFEFF' for c in text)
+    return any(lo <= ord(c) <= hi for lo, hi in ARABIC_RANGES for c in text)
 
 
 def set_rtl(paragraph):
@@ -67,26 +62,18 @@ def set_rtl(paragraph):
     pPr.append(bidi)
 
 
-def set_arabic_font(run):
+def set_run_font(run, font_name: str):
     rPr = run._element.get_or_add_rPr()
     rFonts = OxmlElement('w:rFonts')
-    rFonts.set(qn('w:eastAsia'), 'Traditional Arabic')
-    rFonts.set(qn('w:cs'), 'Traditional Arabic')
-    rFonts.set(qn('w:ascii'), 'Traditional Arabic')
-    rFonts.set(qn('w:hAnsi'), 'Traditional Arabic')
+    rFonts.set(qn('w:ascii'), font_name)
+    rFonts.set(qn('w:hAnsi'), font_name)
+    rFonts.set(qn('w:cs'), font_name)
+    rFonts.set(qn('w:eastAsia'), font_name)
+    # remove old rFonts if exists
+    for child in list(rPr):
+        if child.tag == qn('w:rFonts'):
+            rPr.remove(child)
     rPr.insert(0, rFonts)
-
-
-def detect_alignment(bbox, page_width) -> str:
-    x0, _, x1, _ = bbox
-    margin_left = x0
-    margin_right = page_width - x1
-    text_width = x1 - x0
-    if text_width < page_width * 0.3:
-        if margin_left < page_width * 0.05: return 'left'
-        elif margin_right < page_width * 0.05: return 'right'
-        elif margin_left > page_width * 0.3 and margin_right > page_width * 0.3: return 'center'
-    return 'justify'
 
 
 def extract_color(span) -> Tuple[int, int, int]:
@@ -96,12 +83,43 @@ def extract_color(span) -> Tuple[int, int, int]:
     return (0, 0, 0)
 
 
+def pick_font(text: str, span_font: str) -> str:
+    """Pick the best font for a word based on content and original span font."""
+    if not span_font or span_font == 'ArialMT':
+        return 'Traditional Arabic' if has_arabic(text) else 'Arial'
+    # Map common PDF fonts to Word fonts
+    font_map = {
+        'ArialMT': 'Arial',
+        'Arial-BoldMT': 'Arial',
+        'Arial-ItalicMT': 'Arial',
+        'Arial-BoldItalicMT': 'Arial',
+        'TimesNewRomanPSMT': 'Times New Roman',
+        'TimesNewRomanPS-BoldMT': 'Times New Roman',
+        'TimesNewRomanPS-ItalicMT': 'Times New Roman',
+        'TimesNewRomanPS-BoldItalicMT': 'Times New Roman',
+        'CourierNewPSMT': 'Courier New',
+        'CourierNewPS-BoldMT': 'Courier New',
+        'CourierNewPS-ItalicMT': 'Courier New',
+        'CourierNewPS-BoldItalicMT': 'Courier New',
+        'TraditionalArabic': 'Traditional Arabic',
+        'Traditional Arabic': 'Traditional Arabic',
+        'Calibri': 'Calibri',
+        'Calibri-Bold': 'Calibri',
+        'Calibri-Italic': 'Calibri',
+        'Calibri-BoldItalic': 'Calibri',
+    }
+    mapped = font_map.get(span_font, span_font)
+    # If text is Arabic but font isn't Arabic-friendly, override
+    if has_arabic(text) and mapped not in ('Traditional Arabic', 'Arial', 'Calibri', 'Times New Roman'):
+        return 'Traditional Arabic'
+    return mapped
+
+
 # ═══════════════════════════════════════════════
-#  STEP 1 - READ & EXTRACT
+#  STEP 1 - READ & EXTRACT (word by word)
 #  ═══════════════════════════════════════════════
-#  اقرأ الـ PDF كامل
-#  احفظ كل كلمة + تنسيقها بالذاكرة
-#  lines = [LineInfo[WordInfo, WordInfo, ...], ...]
+#  Uses PyMuPDF "words" for correct segmentation,
+#  then maps each word to its span for formatting.
 
 def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
     pdf = fitz.open(pdf_path)
@@ -111,13 +129,15 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
         page = pdf[page_num]
         pw = page.rect.width
 
-        blocks = page.get_text('dict')['blocks']
+        # Get clean word segmentation with positions
+        raw_words = page.get_text("words")  # (x0,y0,x1,y1,word,block_no,line_no,word_no)
+        # Get detailed dict for formatting info
+        blocks = page.get_text("dict")["blocks"]
 
         lines_info = []
-        tables_info = []
         images_info = []
 
-        # Images
+        # Extract images
         for block in blocks:
             if block['type'] != 1: continue
             try:
@@ -126,107 +146,123 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
                 h = b[3]-b[1]
                 if w < 20 or h < 20: continue
                 pix = page.get_pixmap(clip=b, width=int(w), height=int(h))
-                images_info.append(ImageInfo(
-                    png_bytes=pix.tobytes('png'),
-                    width_in=w/72,
-                    height_in=h/72,
-                ))
-            except: pass
+                images_info.append((pix.tobytes('png'), w/72, h/72))
+            except:
+                pass
 
-        # Extract text blocks with words
-        text_blocks = [b for b in blocks if b['type'] == 0]
+        if not raw_words:
+            pages.append(PageInfo(lines=[], images=images_info))
+            continue
 
-        # Simple table detection
-        used_blocks = set()
-        if len(text_blocks) >= 6:
-            grid_map = {}
-            for bi, b in enumerate(text_blocks):
-                for line in b.get('lines', []):
-                    for span in line.get('spans', []):
-                        txt = span['text'].strip()
-                        if txt:
-                            grid_map[(round(b['bbox'][1], -1), round(b['bbox'][0], -1), bi)] = txt
-
-            if len(grid_map) >= 4:
-                rows = {}
-                for (ry, cx, bi), txt in grid_map.items():
-                    rows.setdefault(ry, {})[cx] = txt
-                sorted_rows = sorted(rows.keys())
-                if len(sorted_rows) >= 2:
-                    all_cols = sorted(set(cx for (_, cx, _) in grid_map))
-                    if len(all_cols) >= 2:
-                        table_rows = []
-                        for ry in sorted_rows:
-                            row = [rows[ry].get(cx, '') for cx in all_cols]
-                            if any(c.strip() for c in row):
-                                table_rows.append(row)
-                        if len(table_rows) >= 2:
-                            tables_info.append(TableInfo(
-                                rows=table_rows,
-                                has_arabic=any(has_arabic(c) for row in table_rows for c in row),
-                            ))
-                            for ry, _, _ in grid_map:
-                                for bi2, b2 in enumerate(text_blocks):
-                                    if round(b2['bbox'][1], -1) == ry:
-                                        used_blocks.add(id(b2))
-
-        # Extract words from remaining blocks
-        all_words = []
-        for bi, block in enumerate(text_blocks):
-            if id(block) in used_blocks: continue
-            block_y = block['bbox'][1]
-            block_x = block['bbox'][0]
-            line_words = []
-
+        # Build span lookup: for each word position, find which span it falls in
+        # Extract all spans with their bbox and formatting
+        span_list = []  # (x0, y0, x1, y1, text, font, size, bold, italic, color)
+        for block in blocks:
+            if block['type'] != 0: continue
             for line in block.get('lines', []):
                 for span in line.get('spans', []):
+                    sb = span['bbox']
                     txt = span['text']
-                    if not txt.strip() and not txt:
-                        # Whitespace-only span - still need to preserve as word
-                        line_words.append(WordInfo(
-                            text=txt,
-                            font=span.get('font', 'Arial'),
-                            size=span.get('size', 11),
-                            bold=bool(span['flags'] & 2),
-                            italic=bool(span['flags'] & 1),
-                            color=extract_color(span),
-                        ))
+                    if not txt.strip():
                         continue
-                    # Split into individual words (preserving spaces between)
-                    words = txt.split(' ')
-                    for wi, w in enumerate(words):
-                        if wi < len(words) - 1:
-                            w += ' '
-                        line_words.append(WordInfo(
-                            text=w,
-                            font=span.get('font', 'Arial'),
-                            size=span.get('size', 11),
-                            bold=bool(span['flags'] & 2),
-                            italic=bool(span['flags'] & 1),
-                            color=extract_color(span),
-                        ))
+                    font = span.get('font', 'Arial')
+                    size = span.get('size', 11)
+                    flags = span.get('flags', 0)
+                    span_list.append((
+                        sb[0], sb[1], sb[2], sb[3],
+                        txt, font, size,
+                        bool(flags & 2),  # bold
+                        bool(flags & 1),  # italic
+                        extract_color(span),
+                    ))
 
-            block_text = ''.join(w.text for w in line_words)
-            if not block_text.strip(): continue
-            block_arabic = has_arabic(block_text)
-            block_align = 'right' if block_arabic else detect_alignment(block['bbox'], pw)
+        def find_span(wx0, wy0, wx1, wy1):
+            """Find the span that mostly contains this word bbox."""
+            wcx = (wx0 + wx1) / 2
+            wcy = (wy0 + wy1) / 2
+            best = None
+            best_area = 0
+            for sx0, sy0, sx1, sy1, stxt, sfont, ssize, sbold, sital, scol in span_list:
+                if sx0 <= wcx <= sx1 and sy0 <= wcy <= sy1:
+                    area = (sx1 - sx0) * (sy1 - sy0)
+                    if area > best_area:
+                        best_area = area
+                        best = (sfont, ssize, sbold, sital, scol)
+            return best
+
+        # Group words into lines by y-position
+        LINE_TOLERANCE = page.rect.height * 0.015  # 1.5% of page height
+        word_lines = []  # list of lists of (word, x0, y0, x1, y1, font_info)
+        for w in raw_words:
+            wx0, wy0, wx1, wy1, word = w[0], w[1], w[2], w[3], w[4]
+            font_info = find_span(wx0, wy0, wx1, wy1) or ('Arial', 11, False, False, (0,0,0))
+            placed = False
+            for line in word_lines:
+                if line and abs(line[0][3] - wy0) < LINE_TOLERANCE:
+                    line.append((word, wx0, wy0, wx1, wy1, font_info))
+                    placed = True
+                    break
+            if not placed:
+                word_lines.append([(word, wx0, wy0, wx1, wy1, font_info)])
+
+        # Sort each line left-to-right, then sort lines top-to-bottom
+        for line in word_lines:
+            line.sort(key=lambda x: x[1])  # sort by x0 within line
+
+        # Handle RTL lines: if Arabic detected, reverse word order
+        for line in word_lines:
+            line_text = ' '.join(x[0] for x in line)
+            if has_arabic(line_text):
+                line.reverse()
+
+        word_lines.sort(key=lambda x: x[0][2])  # sort lines by y0
+
+        # Build LineInfo objects
+        for line in word_lines:
+            if not line: continue
+            line_words_info = []
+            line_text_combined = ''
+            for i, (word, wx0, wy0, wx1, wy1, (sfont, ssize, sbold, sital, scol)) in enumerate(line):
+                # Add space between words
+                display_word = word + (' ' if i < len(line) - 1 else '')
+                line_text_combined += display_word
+                mapped_font = pick_font(word, sfont)
+                line_words_info.append(WordInfo(
+                    text=display_word,
+                    font=mapped_font,
+                    size=ssize,
+                    bold=sbold,
+                    italic=sital,
+                    color=scol,
+                ))
+
+            line_has_arabic = has_arabic(line_text_combined)
+
+            # Detect alignment from the first word's position
+            first_x = line[0][1]
+            last_x = line[-1][3]
+            line_width = last_x - first_x
+            margin_left = first_x
+            margin_right = pw - last_x
+
+            if line_width < pw * 0.3 and margin_right < pw * 0.05:
+                alignment = 'right'
+            elif line_width < pw * 0.3 and margin_left < pw * 0.05:
+                alignment = 'left'
+            elif margin_left > pw * 0.25 and margin_right > pw * 0.25:
+                alignment = 'center'
+            else:
+                alignment = 'justify'
 
             lines_info.append(LineInfo(
-                words=line_words,
-                alignment=block_align,
-                has_arabic=block_arabic,
-                y=block_y,
-                x=block_x,
+                words=line_words_info,
+                alignment=alignment,
+                has_arabic=line_has_arabic,
+                y=line[0][2],
+                x=first_x,
             ))
 
-        # Sort: top-to-bottom, right-to-left for Arabic
-        lines_info.sort(key=lambda l: (l.y, -l.x if l.has_arabic else l.x))
-
-        pages.append(PageInfo(
-            lines=lines_info,
-            tables=tables_info,
-            images=images_info,
-        ))
+        pages.append(PageInfo(lines=lines_info, images=images_info))
 
     pdf.close()
     return pages
@@ -235,46 +271,29 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
 # ═══════════════════════════════════════════════
 #  STEP 2 - TYPE INTO WORD (word by word)
 #  ═══════════════════════════════════════════════
-#  افتح Word جديد
-#  اكتب كل كلمة وحدة وحدة كـ run
-#  مثل ما يكتبها انسان على لوحة المفاتيح
 
 def type_into_word(doc: Document, pages: List[PageInfo]) -> List:
-    """Step 2: اكتب النص في Word كلمة كلمة.
-    يرجع refs = [(paragraph, run, word_info), ...] عشان الخطوة 3 تنسّق كل كلمة."""
     refs = []
 
     for page_idx, page in enumerate(pages):
         for line in page.lines:
             p = doc.add_paragraph()
-            p.paragraph_format.space_after = Pt(6)
+            p.paragraph_format.space_after = Pt(4)
             p.paragraph_format.space_before = Pt(2)
-            p.paragraph_format.line_spacing = 1.3
+            p.paragraph_format.line_spacing = 1.2
             for word in line.words:
                 run = p.add_run(word.text)
                 refs.append((p, run, word, line))
-        # Tables
-        for table in page.tables:
-            if not table.rows: continue
-            cols = max(len(r) for r in table.rows)
-            wt = doc.add_table(rows=len(table.rows), cols=cols)
-            wt.style = 'Table Grid'
-            for ri, row in enumerate(table.rows):
-                for ci in range(min(len(row), cols)):
-                    cell = wt.cell(ri, ci)
-                    cell.text = ''
-                    cell_p = cell.paragraphs[0]
-                    cell_p.add_run(row[ci])
-            refs.append(('table', wt, table))
+
         # Images
-        for img in page.images:
-            if img.width_in > 0.5 and img.height_in > 0.5:
-                w = min(img.width_in, 6.0)
+        for img_bytes, w_in, h_in in page.images:
+            if w_in > 0.5 and h_in > 0.5:
+                w = min(w_in, 6.0)
                 p = doc.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run = p.add_run()
-                run.add_picture(img.png_bytes, width=Inches(w))
-                refs.append(('image', p, None))
+                run.add_picture(img_bytes, width=Inches(w))
+
         if page_idx < len(pages) - 1:
             doc.add_page_break()
 
@@ -284,8 +303,6 @@ def type_into_word(doc: Document, pages: List[PageInfo]) -> List:
 # ═══════════════════════════════════════════════
 #  STEP 3 - FORMAT LIKE HUMAN
 #  ═══════════════════════════════════════════════
-#  طبق التنسيق اللي حفظناه على كل كلمة
-#  كأن انسان ينسّق بالماوس: خط، لون، محاذاة
 
 def format_like_human(refs: List):
     last_p = None
@@ -293,7 +310,6 @@ def format_like_human(refs: List):
         if len(item) == 4:
             p, run, word, line = item
 
-            # Paragraph-level formatting (مرة واحدة لكل فقرة)
             if p is not last_p:
                 align_map = {
                     'left': WD_ALIGN_PARAGRAPH.LEFT,
@@ -307,32 +323,17 @@ def format_like_human(refs: List):
                     set_rtl(p)
                 last_p = p
 
-            # Word-level formatting ← هنا التنسيق كلمة كلمة
-            if line.has_arabic or has_arabic(run.text):
-                run.font.name = 'Traditional Arabic'
-                set_arabic_font(run)
-            else:
-                run.font.name = 'Arial'
-
+            # Per-word font
+            set_run_font(run, word.font)
             size = max(7, min(word.size, 72))
             run.font.size = Pt(size)
             run.bold = word.bold
             run.italic = word.italic
             if word.color != (0, 0, 0):
-                try: run.font.color.rgb = RGBColor(*word.color)
-                except: pass
-
-        elif item[0] == 'table':
-            _, wt, table = item
-            if table.has_arabic:
-                for row in wt.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            set_rtl(p)
-                            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                            for run in p.runs:
-                                run.font.name = 'Traditional Arabic'
-                                set_arabic_font(run)
+                try:
+                    run.font.color.rgb = RGBColor(*word.color)
+                except:
+                    pass
 
 
 # ═══════════════════════════════════════════════
@@ -342,12 +343,10 @@ def format_like_human(refs: List):
 def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     t0 = time.time()
 
-    # ── STEP 1: اقرأ الـ PDF واحفظ كل كلمة + تنسيقها ──
     t1 = time.time()
     pages = extract_from_pdf(input_path)
     extract_time = time.time() - t1
 
-    # ── STEP 2: اكتب في Word كلمة كلمة ──
     t2 = time.time()
     doc = Document()
     section = doc.sections[0]
@@ -361,7 +360,6 @@ def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     refs = type_into_word(doc, pages)
     type_time = time.time() - t2
 
-    # ── STEP 3: طبق التنسيق المحفوظ ──
     t3 = time.time()
     format_like_human(refs)
     format_time = time.time() - t3
