@@ -552,13 +552,13 @@ function convertWithPython(inputPath, outputDir) {
     if (!fs.existsSync(scriptPath)) return null;
 
     const result = spawnSync('python3', [scriptPath, inputPath, outputDir], {
-      timeout: 180000,
+      timeout: 600000,
       maxBuffer: 100 * 1024 * 1024
     });
 
     if (result.status !== 0) {
       const result2 = spawnSync('python', [scriptPath, inputPath, outputDir], {
-        timeout: 180000,
+        timeout: 600000,
         maxBuffer: 100 * 1024 * 1024
       });
       if (result2.status !== 0) return null;

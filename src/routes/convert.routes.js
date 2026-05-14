@@ -75,6 +75,17 @@ router.post('/upload', (req, res) => {
       await conversion.save();
 
       setImmediate(async () => {
+        const timeoutMs = 600000; // 10 دقائق حد أقصى للتحويل
+        const timeoutId = setTimeout(async () => {
+          try {
+            conversion.status = 'failed';
+            conversion.errorMessage = 'انتهت مهلة التحويل (أكثر من 10 دقائق)';
+            conversion.progress = 0;
+            conversion.step = null;
+            await conversion.save();
+          } catch (_) {}
+        }, timeoutMs);
+
         try {
           conversion.progress = 10;
           conversion.step = 'reading';
@@ -92,6 +103,8 @@ router.post('/upload', (req, res) => {
             req.body.language || 'ara',
             req.body.quality || 'normal'
           );
+
+          clearTimeout(timeoutId);
 
           conversion.step = 'formatting';
           conversion.progress = 70;
@@ -113,6 +126,7 @@ router.post('/upload', (req, res) => {
 
           await conversion.save();
         } catch (convError) {
+          clearTimeout(timeoutId);
           console.error('Conversion error:', convError);
           conversion.status = 'failed';
           conversion.errorMessage = convError.message || 'Conversion failed';
