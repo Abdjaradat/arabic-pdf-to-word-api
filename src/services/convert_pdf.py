@@ -1,5 +1,12 @@
 # RSWS Algorithm: Read -> Store -> Write -> Style
 # اختراع: Read PDF, Store words+formatting, Write word-by-word into Word, Style each word
+#
+# CONFIDENTIAL — Proprietary Intellectual Property
+# The RSWS engine, including its document reconstruction pipeline, iterative correction
+# workflow, layout recovery logic, visual comparison system, and adaptive refinement
+# methodology, constitutes proprietary intellectual property.
+# Unauthorized disclosure, publication, reproduction, reverse engineering, redistribution,
+# or commercial usage is strictly prohibited.
 import sys
 import os
 import json

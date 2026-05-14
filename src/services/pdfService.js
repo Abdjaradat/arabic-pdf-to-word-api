@@ -1,3 +1,11 @@
+// RSWS Algorithm: Read -> Store -> Write -> Style
+// CONFIDENTIAL — Proprietary Intellectual Property
+// The RSWS engine, including its document reconstruction pipeline, iterative correction
+// workflow, layout recovery logic, visual comparison system, and adaptive refinement
+// methodology, constitutes proprietary intellectual property.
+// Unauthorized disclosure, publication, reproduction, reverse engineering, redistribution,
+// or commercial usage is strictly prohibited.
+
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
