@@ -89,7 +89,8 @@ router.post('/upload', (req, res) => {
           const result = await convertPdfToWord(
             req.file.path,
             path.join(__dirname, '..', '..', 'uploads'),
-            req.body.language || 'ara'
+            req.body.language || 'ara',
+            req.body.quality || 'normal'
           );
 
           conversion.step = 'formatting';

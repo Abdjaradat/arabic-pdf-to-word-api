@@ -572,37 +572,39 @@ function convertWithPython(inputPath, outputDir) {
   }
 }
 
-async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
+async function convertPdfToWord(inputPath, outputDir, language = 'ara', quality = 'normal') {
   const isRtl = language === 'ara';
 
-  // 1. Recursive RSWS: 100 iterations (اقرا → احفظ → اكتب → نسق → PDF → كرر)
-  console.log('Trying recursive RSWS (100 iterations)...');
-  const recResult = convertWithPythonRecursive(inputPath, outputDir);
-  if (recResult) return recResult;
+  // Quality modes: 'normal' (سريع) or 'high' (100 لوب)
+  if (quality === 'high') {
+    console.log('HIGH QUALITY: Running recursive RSWS (100 iterations)...');
+    const recResult = convertWithPythonRecursive(inputPath, outputDir);
+    if (recResult) return recResult;
+  }
 
-  // 2. Python PyMuPDF RSWS (single pass)
+  // 1. Python PyMuPDF RSWS (سريع — 2-5 ثواني)
   console.log('Trying Python RSWS converter (PyMuPDF)...');
   const pyResult = convertWithPython(inputPath, outputDir);
   if (pyResult) return pyResult;
 
-  // 3. Node.js RSWS (pdftotext — احتياطي بدون تنسيق)
+  // 2. Node.js RSWS (pdftotext)
   console.log('Trying Node.js RSWS converter (pdftotext)...');
   const rsws = await convertWithRSWS(inputPath, outputDir);
   if (rsws) return rsws;
 
-  // 3. Azure AI (إذا كان مفتاح API موجود)
+  // 3. Azure AI
   const azure = await convertWithAzure(inputPath, outputDir);
   if (azure) return azure;
 
-  // 4. Google Gemini (إذا كان مفتاح API موجود)
+  // 4. Google Gemini
   const gemini = await convertWithGemini(inputPath, outputDir);
   if (gemini) return gemini;
 
-  // 5. LibreOffice — يحافظ على التنسيق البصري
+  // 5. LibreOffice
   const lo = convertWithLibreOffice(inputPath, outputDir);
   if (lo) return lo;
 
-  // 6. pdftotext — استخراج النص العربي (fallback)
+  // 6. pdftotext (fallback)
   console.log('Using Node.js converter (pdftotext → docx)');
   return convertWithNode(inputPath, outputDir, isRtl);
 }
