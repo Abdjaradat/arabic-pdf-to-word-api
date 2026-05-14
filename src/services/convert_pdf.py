@@ -521,6 +521,118 @@ def run_optimizer(output_dir: str):
         print("Optimizer failed: no valid config found")
 
 
+# ── Recursive RSWS: RSWS → Word → PDF → RSWS ... 100 times ──
+def word_to_pdf(docx_path: str, output_dir: str) -> str:
+    """Convert Word to PDF using LibreOffice (or fallback using subprocess)."""
+    import subprocess
+    pdf_path = os.path.join(output_dir, f"{uuid.uuid4()}.pdf")
+
+    # Try LibreOffice first
+    for cmd in ['libreoffice', 'soffice']:
+        try:
+            subprocess.run([cmd, '--headless', '--convert-to', 'pdf',
+                          '--outdir', output_dir, docx_path],
+                         capture_output=True, timeout=120)
+            # LibreOffice saves with same name but .pdf extension
+            lo_pdf = os.path.splitext(docx_path)[0] + '.pdf'
+            if os.path.exists(lo_pdf):
+                os.rename(lo_pdf, pdf_path)
+                return pdf_path
+        except: pass
+
+    # Fallback: use python-docx + reportlab (basic)
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        from docx import Document as DocxReader
+        c = canvas.Canvas(pdf_path, pagesize=A4)
+        doc = DocxReader(docx_path)
+        y = 800
+        for p in doc.paragraphs:
+            c.drawString(50, y, p.text[:100] if p.text else '')
+            y -= 20
+            if y < 50: c.showPage(); y = 800
+        c.save()
+        return pdf_path
+    except: pass
+
+    return None
+
+
+def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> str:
+    """
+    Run RSWS recursively: RSWS → Word → PDF → RSWS → Word → PDF → ... × iterations
+    يقرا الـ PDF → يحفظ الكلمات → يكتب Word → يحوله PDF → يعيد الكرة 100 مرة
+    """
+    current_pdf = input_pdf
+    final_word = None
+    loop_dir = os.path.join(output_dir, '_recursive_loop')
+    os.makedirs(loop_dir, exist_ok=True)
+
+    print(f"Recursive RSWS: {iterations} iterations starting...")
+    print(f"  Input: {input_pdf}")
+    print(f"  Loop dir: {loop_dir}")
+
+    errors_streak = 0
+
+    for i in range(iterations):
+        t0 = time.time()
+        iter_tag = f"{i+1:03d}"
+        iter_word = os.path.join(loop_dir, f"iter_{iter_tag}.docx")
+        iter_pdf = os.path.join(loop_dir, f"iter_{iter_tag}.pdf") if i < iterations - 1 else None
+
+        try:
+            # STEP 1: RSWS → Word (اقرا → احفظ → اكتب → نسق)
+            pages = extract_from_pdf(current_pdf)
+            doc = Document()
+            section = doc.sections[0]
+            section.page_width = Cm(21.0); section.page_height = Cm(29.7)
+            section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
+            section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
+            refs = type_into_word(doc, pages)
+            format_like_human(refs)
+            doc.save(iter_word)
+
+            word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
+            errors_streak = 0
+            final_word = iter_word
+
+            # STEP 2: Word → PDF (للوجة القادمة)
+            if i < iterations - 1:
+                pdf_result = word_to_pdf(iter_word, loop_dir)
+                if pdf_result and os.path.exists(pdf_result):
+                    current_pdf = pdf_result
+                else:
+                    # PDF conversion failed — use same PDF, RSWS will be similar
+                    pass
+
+            elapsed = time.time() - t0
+            status = "✓" if i == iterations - 1 else "→"
+            print(f"  [{iter_tag}/{iterations}] {status} words={word_count:>5} "
+                  f"time={elapsed:.2f}s PDF={'ok' if i == iterations-1 or (pdf_result and os.path.exists(pdf_result)) else 'skip'}")
+
+        except Exception as e:
+            errors_streak += 1
+            print(f"  [{iter_tag}/{iterations}] X ERROR: {str(e)[:60]}")
+            if errors_streak >= 3:
+                print(f"  Stopping: {errors_streak} consecutive errors")
+                break
+            continue
+
+    print(f"\nRecursive RSWS done! ({iterations} iterations)")
+    print(f"Final output: {final_word}")
+
+    # Copy final word to output_dir with clean name
+    if final_word and os.path.exists(final_word):
+        final_name = f"rsws_recursive_{uuid.uuid4().hex[:8]}.docx"
+        final_path = os.path.join(output_dir, final_name)
+        import shutil
+        shutil.copy2(final_word, final_path)
+        return final_path
+
+    return final_word
+
+
 if __name__ == '__main__':
     if len(sys.argv) >= 2 and sys.argv[1] in ('--optimize', '-o'):
         output_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(__file__), '..', '..', 'uploads')
@@ -528,8 +640,29 @@ if __name__ == '__main__':
         run_optimizer(output_dir)
         sys.exit(0)
 
+    if len(sys.argv) >= 2 and sys.argv[1] in ('--recursive', '-r'):
+        input_pdf = sys.argv[2] if len(sys.argv) > 2 else None
+        output_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.dirname(__file__), '..', '..', 'uploads')
+        iterations = int(sys.argv[4]) if len(sys.argv) > 4 else 100
+        if not input_pdf:
+            print(json.dumps({'error': 'Missing input PDF for recursive mode. Usage: --recursive <input_pdf> [output_dir] [iterations]'}))
+            sys.exit(1)
+        os.makedirs(output_dir, exist_ok=True)
+        final = recursive_rsws(input_pdf, output_dir, iterations)
+        if final:
+            result = {
+                'outputPath': final.replace('\\', '/'),
+                'outputFileName': os.path.basename(final),
+                'method': 'rsws_recursive',
+                'iterations': iterations,
+            }
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print(json.dumps({'error': 'Recursive RSWS failed'}))
+        sys.exit(0)
+
     if len(sys.argv) < 3:
-        print(json.dumps({'error': 'Missing arguments. Use --optimize to run optimizer, or pass <input_pdf> <output_dir>'}))
+        print(json.dumps({'error': 'Missing arguments. Use --optimize, --recursive, or pass <input_pdf> <output_dir>'}))
         sys.exit(1)
 
     input_path = sys.argv[1]

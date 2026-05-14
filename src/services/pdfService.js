@@ -495,6 +495,48 @@ async function convertWithRSWS(inputPath, outputDir) {
   };
 }
 
+// ── Recursive RSWS: RSWS → Word → PDF → RSWS → ... × 100 ──
+function convertWithPythonRecursive(inputPath, outputDir) {
+  try {
+    const scriptPath = path.join(__dirname, 'convert_pdf.py');
+    if (!fs.existsSync(scriptPath)) return null;
+
+    console.log('Python recursive RSWS: 100 iterations...');
+    const result = spawnSync('python3', [
+      scriptPath, '--recursive', inputPath, outputDir, '100'
+    ], {
+      timeout: 600000,  // 10 minutes for 100 iterations
+      maxBuffer: 100 * 1024 * 1024
+    });
+
+    if (result.status !== 0) {
+      const result2 = spawnSync('python', [
+        scriptPath, '--recursive', inputPath, outputDir, '100'
+      ], {
+        timeout: 600000,
+        maxBuffer: 100 * 1024 * 1024
+      });
+      if (result2.status !== 0) return null;
+      try {
+        const parsed = JSON.parse(result2.stdout.toString());
+        if (parsed.error) return null;
+        parsed.method = 'rsws_recursive';
+        return parsed;
+      } catch (_) { return null; }
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout.toString());
+      if (parsed.error) return null;
+      parsed.method = 'rsws_recursive';
+      return parsed;
+    } catch (_) { return null; }
+  } catch (e) {
+    console.warn('Python recursive RSWS failed:', e.message);
+    return null;
+  }
+}
+
 // ── Python PyMuPDF converter (بالنسبة للبيئة اللي فيها Python) ──
 function convertWithPython(inputPath, outputDir) {
   try {
@@ -533,12 +575,17 @@ function convertWithPython(inputPath, outputDir) {
 async function convertPdfToWord(inputPath, outputDir, language = 'ara') {
   const isRtl = language === 'ara';
 
-  // 1. Python PyMuPDF RSWS (الأفضل — يستخرج التنسيق الأصلي)
+  // 1. Recursive RSWS: 100 iterations (اقرا → احفظ → اكتب → نسق → PDF → كرر)
+  console.log('Trying recursive RSWS (100 iterations)...');
+  const recResult = convertWithPythonRecursive(inputPath, outputDir);
+  if (recResult) return recResult;
+
+  // 2. Python PyMuPDF RSWS (single pass)
   console.log('Trying Python RSWS converter (PyMuPDF)...');
   const pyResult = convertWithPython(inputPath, outputDir);
   if (pyResult) return pyResult;
 
-  // 2. Node.js RSWS (pdftotext — احتياطي بدون تنسيق)
+  // 3. Node.js RSWS (pdftotext — احتياطي بدون تنسيق)
   console.log('Trying Node.js RSWS converter (pdftotext)...');
   const rsws = await convertWithRSWS(inputPath, outputDir);
   if (rsws) return rsws;
