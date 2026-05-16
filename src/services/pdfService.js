@@ -513,7 +513,7 @@ function convertWithPythonRecursive(inputPath, outputDir, iterations = 100) {
     const result = spawnSync('python3', [
       scriptPath, '--recursive', inputPath, outputDir, String(iterations)
     ], {
-      timeout: Math.min(iterations * 6000, 600000),
+      timeout: Math.min(iterations * 10000, 120000),
       maxBuffer: 100 * 1024 * 1024
     });
 
@@ -584,18 +584,18 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara', quality 
   const isRtl = language === 'ara';
 
   // ثلاث مستويات:
-  //   normal  = RSWS مرة واحدة  (إعلان قصير)
-  //   high    = RSWS 50 مرة     (إعلان متوسط)
-  //   premium = RSWS 100 مرة    (إعلان طويل)
+  //   normal  = RSWS مرة واحدة   (مجاناً)
+  //   high    = RSWS مرتين        (مشاركة 3 مرات)
+  //   premium = RSWS 3 مرات       (مشاركة 3 مرات)
   if (quality === 'premium') {
-    console.log('PREMIUM: Running recursive RSWS (100 iterations)...');
-    const recResult = convertWithPythonRecursive(inputPath, outputDir, 100);
+    console.log('PREMIUM: Running recursive RSWS (3 iterations)...');
+    const recResult = convertWithPythonRecursive(inputPath, outputDir, 3);
     if (recResult) return recResult;
   }
 
   if (quality === 'high') {
-    console.log('HIGH: Running recursive RSWS (50 iterations)...');
-    const recResult = convertWithPythonRecursive(inputPath, outputDir, 50);
+    console.log('HIGH: Running recursive RSWS (2 iterations)...');
+    const recResult = convertWithPythonRecursive(inputPath, outputDir, 2);
     if (recResult) return recResult;
   }
 
