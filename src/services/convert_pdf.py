@@ -476,23 +476,31 @@ def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     t0 = time.time()
     used_method = 'rsws'
 
-    # Step 0: Smart extraction — try PyMuPDF first, fallback to multi-backend+OCR
+    # Step 0: Smart extraction — try PyMuPDF first, fix garbled chars via GARBLED_MAP
     t1 = time.time()
     pages = extract_from_pdf(input_path)
     extract_time = time.time() - t1
 
-    # Check quality of PyMuPDF extraction
+    # Fix garbled chars in PyMuPDF text using GARBLED_MAP
+    if HAS_TEXT_READER:
+        from text_reader import normalize_arabic
+        for page in pages:
+            for line in page.lines:
+                for word in line.words:
+                    word.text = normalize_arabic(word.text)
+
+    # Check quality of PyMuPDF extraction (after fix)
     all_text = ''.join(w.text for p in pages for l in p.lines for w in l.words)
     garbled_info = check_garbled(all_text)
     repl_count = sum(1 for c in all_text if ord(c) == 0xFFFD)
     is_garbled = garbled_info['garbled'] or repl_count > max(len(all_text) * 0.01, 5)
 
     if is_garbled:
-        print(f"  [!] PyMuPDF text garbled: {garbled_info['count']} suspicious, {repl_count} replacement — trying smart extraction", file=sys.stderr)
+        print(f"  [!] PyMuPDF text still garbled after fix: {garbled_info['count']} suspicious, {repl_count} replacement — trying smart extraction", file=sys.stderr)
     else:
-        print(f"  [✓] PyMuPDF text clean: {len(all_text)} chars", file=sys.stderr)
+        print(f"  [✓] PyMuPDF text clean after GARBLED_MAP fix: {len(all_text)} chars", file=sys.stderr)
 
-    # If PyMuPDF text is garbled, try multi-backend extraction
+    # If PyMuPDF text is still garbled, try multi-backend extraction
     smart_text = None
     if is_garbled and HAS_TEXT_READER:
         smart = smart_extract(input_path)

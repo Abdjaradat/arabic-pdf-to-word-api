@@ -31,6 +31,57 @@ GARBLED_BLOCKS = [
 ]
 
 
+# ── Garbled character mapping ──
+# Some PDFs use CID fonts with broken ToUnicode CMap.
+# Each garbled character maps consistently to one Arabic letter.
+GARBLED_MAP = {
+    '\u020A': '\u0628', '\u020B': '\u0628',  # Ȋȋ -> ب
+    '\u0288': '\u064A', '\u0287': '\u064A',  # ʈʇ -> ي
+    '\u074D': '\u0644',  # ݍ -> ل
+    '\u06DA': '\u0646',  # ۚ -> ن
+    '\u06D8': '\u062A',  # ۘ -> ت
+    '\u0262': '\u064A',  # ɢ -> ي
+    '\u0260': '\u0643',  # ɠ -> ك
+    '\u028F': '\u0647',  # ʏ -> ه
+    '\u0284': '\u0644',  # ʄ -> ل
+    '\u08AD': '\u0641',  # ࢭ -> ف/في
+    '\u0605': '\u062A',  # ؅ -> ت
+    '\u06C2': '\u0647',  # ۂ -> ه
+    '\u0272': '\u0646',  # ɲ -> ن
+    '\u0259': '\u0627',  # ə -> ا
+    '\u0242': '\u0628',  # ɂ -> ب
+    '\u0261': '\u0643',  # ɡ -> ك
+    '\u0256': '\u062F',  # ɖ -> د
+    '\u027E': '\u0631',  # ɾ -> ر
+    '\u026C': '\u0644',  # ɬ -> ل
+    '\u026E': '\u0645',  # ɮ -> م
+    '\u0271': '\u0645',  # ɱ -> م
+    '\u0250': '\u0627',  # ɐ -> ا
+    '\u0254': '\u0648',  # ɔ -> و
+    '\u0263': '\u063A',  # ɣ -> غ
+    '\u0264': '\u0649',  # ɤ -> ى
+    '\u025C': '\u0627',  # ɜ -> ا
+    '\u025E': '\u0639',  # ɞ -> ع
+    '\u0268': '\u0649',  # ɨ -> ى
+    '\u028E': '\u064A',  # ʎ -> ي
+    '\u0280': '\u0642',  # ɀ -> ق
+    '\u0253': '\u0628',  # ɓ -> ب
+    '\u0127': '\u062D',  # ħ -> ح
+    '\u0129': '\u0649',  # ĩ -> ي
+    '\u0131': '\u0649',  # ı -> ى
+    '\u016B': '\u0648',  # ū -> و
+    '\u0169': '\u0648',  # ũ -> و
+    '\u0153': '\u0648',  # œ -> و
+    '\u0216': '\u0644',  # Ȗ -> ل
+    '\u074F': '\u0644',  # ݏ -> ل
+    '\u0727': '\u0634',  # ܧ -> ش
+    '\u0736': '\u0644',  # ܶ -> ل
+    '\u0726': '\u0643',  # ܦ -> ك
+    '\u0728': '\u0639',  # ܨ -> ع
+    '\u0740': '\u0627',  # ݀ -> ا
+    '\u0735': '\u0646',  # ܵ -> ن
+}
+
 def has_arabic_char(c: str) -> bool:
     cp = ord(c)
     return any(lo <= cp <= hi for lo, hi in ARABIC_BLOCKS)
@@ -219,7 +270,10 @@ def normalize_arabic(text: str) -> str:
     result = []
     for c in text:
         cp = ord(c)
-        if cp in ARABIC_NORM_MAP:
+        # Fix garbled chars from broken ToUnicode CMap
+        if c in GARBLED_MAP:
+            result.append(GARBLED_MAP[c])
+        elif cp in ARABIC_NORM_MAP:
             result.append(chr(ARABIC_NORM_MAP[cp]))
         elif cp == 0xFFFD:
             # Keep replacement chars as-is (caller decides)
