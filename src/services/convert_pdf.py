@@ -534,18 +534,25 @@ def word_to_pdf(docx_path: str, output_dir: str) -> str:
     import subprocess
     pdf_path = os.path.join(output_dir, f"{uuid.uuid4()}.pdf")
 
-    # Try LibreOffice first
+    # Try LibreOffice first (with HOME for Docker compatibility)
+    env = os.environ.copy()
+    env['HOME'] = '/tmp'
     for cmd in ['libreoffice', 'soffice']:
         try:
-            subprocess.run([cmd, '--headless', '--convert-to', 'pdf',
-                          '--outdir', output_dir, docx_path],
-                         capture_output=True, timeout=120)
+            r = subprocess.run([cmd, '--headless', '--convert-to', 'pdf',
+                               '--outdir', output_dir, docx_path],
+                              capture_output=True, timeout=60, env=env)
+            if r.returncode != 0:
+                print(f"  [!] {cmd} stderr: {r.stderr.decode(errors='replace')[:200]}", file=sys.stderr)
+                continue
             # LibreOffice saves with same name but .pdf extension
             lo_pdf = os.path.splitext(docx_path)[0] + '.pdf'
             if os.path.exists(lo_pdf):
                 os.rename(lo_pdf, pdf_path)
+                print(f"  [✓] {cmd} converted to PDF", file=sys.stderr)
                 return pdf_path
-        except: pass
+        except Exception as e:
+            print(f"  [!] {cmd} error: {e}", file=sys.stderr)
 
     # Fallback: use python-docx + reportlab (basic)
     try:
@@ -576,9 +583,9 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
     loop_dir = os.path.join(output_dir, '_recursive_loop')
     os.makedirs(loop_dir, exist_ok=True)
 
-    print(f"Recursive RSWS: {iterations} iterations starting...")
-    print(f"  Input: {input_pdf}")
-    print(f"  Loop dir: {loop_dir}")
+    print(f"Recursive RSWS: {iterations} iterations starting...", file=sys.stderr)
+    print(f"  Input: {input_pdf}", file=sys.stderr)
+    print(f"  Loop dir: {loop_dir}", file=sys.stderr)
 
     errors_streak = 0
 
@@ -603,6 +610,7 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
             word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
             errors_streak = 0
             final_word = iter_word
+            pdf_result = None
 
             # STEP 2: Word → PDF (للوجة القادمة)
             if i < iterations - 1:
@@ -615,19 +623,20 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
 
             elapsed = time.time() - t0
             status = "✓" if i == iterations - 1 else "→"
+            pdf_ok = (i == iterations - 1) or (pdf_result and os.path.exists(pdf_result))
             print(f"  [{iter_tag}/{iterations}] {status} words={word_count:>5} "
-                  f"time={elapsed:.2f}s PDF={'ok' if i == iterations-1 or (pdf_result and os.path.exists(pdf_result)) else 'skip'}")
+                  f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'}", file=sys.stderr)
 
         except Exception as e:
             errors_streak += 1
-            print(f"  [{iter_tag}/{iterations}] X ERROR: {str(e)[:60]}")
+            print(f"  [{iter_tag}/{iterations}] X ERROR: {str(e)[:60]}", file=sys.stderr)
             if errors_streak >= 3:
-                print(f"  Stopping: {errors_streak} consecutive errors")
+                print(f"  Stopping: {errors_streak} consecutive errors", file=sys.stderr)
                 break
             continue
 
-    print(f"\nRecursive RSWS done! ({iterations} iterations)")
-    print(f"Final output: {final_word}")
+    print(f"\nRecursive RSWS done! ({iterations} iterations)", file=sys.stderr)
+    print(f"Final output: {final_word}", file=sys.stderr)
 
     # Copy final word to output_dir with clean name
     if final_word and os.path.exists(final_word):
