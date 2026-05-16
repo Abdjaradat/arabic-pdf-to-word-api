@@ -19,9 +19,9 @@ RUN apt-get update && \
       && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python libraries للاستخراج متعدد الطرق + OCR
-RUN pip3 install PyMuPDF==1.24.9 python-docx==1.1.2 --break-system-packages 2>/dev/null || true
-RUN pip3 install pdf2image pytesseract pdfplumber pypdf --break-system-packages 2>/dev/null || true
+# Install Python libraries
+RUN pip3 install PyMuPDF==1.24.9 python-docx==1.1.2 --break-system-packages
+RUN pip3 install pdf2image pytesseract pdfplumber pypdf --break-system-packages
 
 COPY package*.json ./
 RUN npm install --omit=dev
