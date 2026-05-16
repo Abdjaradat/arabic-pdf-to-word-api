@@ -180,6 +180,63 @@ def pick_font(text: str, span_font: str,
     return mapped
 
 
+# ── Try import text_reader for multi-backend extraction ──
+try:
+    from text_reader import extract_best_text, normalize_arabic, assess_quality as tr_assess
+    HAS_TEXT_READER = True
+except ImportError:
+    HAS_TEXT_READER = False
+
+
+# ═══════════════════════════════════════════════
+#  STEP 0 - SMART EXTRACTION (multi-backend + OCR)
+#  ═══════════════════════════════════════════════
+
+def smart_extract(pdf_path: str) -> dict:
+    """Extract clean text using multi-backend pipeline.
+    Returns {'text': str, 'method': str, 'score': float, 'text_garbled': bool}
+    """
+    # First try PyMuPDF (fastest, has formatting)
+    try:
+        pdf = fitz.open(pdf_path)
+        pymu_text = '\n'.join(page.get_text("text") for page in pdf)
+        pdf.close()
+        q = check_garbled(pymu_text)
+        # Also check replacement chars
+        repl = sum(1 for c in pymu_text if ord(c) == 0xFFFD)
+        if not q['garbled'] and repl < max(len(pymu_text) * 0.005, 5):
+            print(f"  PyMuPDF text clean (garbled={q['count']}, repl={repl})", file=sys.stderr)
+            return {'text': pymu_text, 'method': 'pymupdf', 'score': 100 - repl, 'text_garbled': False}
+        print(f"  PyMuPDF garbled: {q['count']} suspicious, {repl} replacement", file=sys.stderr)
+    except Exception as e:
+        print(f"  PyMuPDF error: {e}", file=sys.stderr)
+
+    # Try multi-backend text_reader
+    if HAS_TEXT_READER:
+        print("  Trying multi-backend text reader...", file=sys.stderr)
+        best = extract_best_text(pdf_path)
+        if best.get('text') and best.get('score', 0) >= 60:
+            print(f"  Best: {best['method']} score={best['score']}", file=sys.stderr)
+            return {
+                'text': best.get('text_normalized', best['text']),
+                'method': best['method'],
+                'score': best['score'],
+                'text_garbled': False,
+                'details': best.get('all_results', []),
+            }
+        else:
+            print(f"  Text reader best score={best.get('score', 0)} — still poor", file=sys.stderr)
+
+    # Fallback: return PyMuPDF text as-is (garbled)
+    try:
+        pdf = fitz.open(pdf_path)
+        text = '\n'.join(page.get_text("text") for page in pdf)
+        pdf.close()
+        return {'text': text, 'method': 'pymupdf_fallback', 'score': 0, 'text_garbled': True}
+    except:
+        return {'text': '', 'method': 'none', 'score': 0, 'text_garbled': True}
+
+
 # ═══════════════════════════════════════════════
 #  STEP 1 - READ & EXTRACT (word by word)
 #  ═══════════════════════════════════════════════
@@ -417,10 +474,33 @@ def format_like_human(refs: List):
 
 def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     t0 = time.time()
+    used_method = 'rsws'
 
+    # Step 0: Smart extraction — try PyMuPDF first, fallback to multi-backend+OCR
     t1 = time.time()
     pages = extract_from_pdf(input_path)
     extract_time = time.time() - t1
+
+    # Check quality of PyMuPDF extraction
+    all_text = ''.join(w.text for p in pages for l in p.lines for w in l.words)
+    garbled_info = check_garbled(all_text)
+    repl_count = sum(1 for c in all_text if ord(c) == 0xFFFD)
+    is_garbled = garbled_info['garbled'] or repl_count > max(len(all_text) * 0.01, 5)
+
+    if is_garbled:
+        print(f"  [!] PyMuPDF text garbled: {garbled_info['count']} suspicious, {repl_count} replacement — trying smart extraction", file=sys.stderr)
+    else:
+        print(f"  [✓] PyMuPDF text clean: {len(all_text)} chars", file=sys.stderr)
+
+    # If PyMuPDF text is garbled, try multi-backend extraction
+    smart_text = None
+    if is_garbled and HAS_TEXT_READER:
+        smart = smart_extract(input_path)
+        if smart.get('text') and not smart.get('text_garbled', True) and len(smart['text']) > 50:
+            from text_reader import normalize_arabic
+            smart_text = normalize_arabic(smart['text'])
+            used_method = smart.get('method', 'rsws_clean')
+            print(f"  [✓] Smart extraction used: {smart['method']} (score={smart.get('score', 0)})", file=sys.stderr)
 
     t2 = time.time()
     doc = Document()
@@ -432,42 +512,53 @@ def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
     section.left_margin = Cm(2.0)
     section.right_margin = Cm(2.0)
 
-    refs = type_into_word(doc, pages)
-    type_time = time.time() - t2
+    if smart_text:
+        # Use clean text from smart extraction (no per-word formatting, but clean text)
+        from text_reader import has_arabic_char
+        for para_text in smart_text.split('\n'):
+            para_text = para_text.strip()
+            if not para_text:
+                continue
+            para_has_arabic = any(has_arabic_char(c) for c in para_text)
+            p = doc.add_paragraph()
+            run = p.add_run(para_text)
+            set_run_font(run, RSWS_CONFIG.get('font_arabic', 'Traditional Arabic'))
+            run.font.size = Pt(12)
+            if para_has_arabic:
+                set_rtl(p)
+                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p.paragraph_format.space_after = Pt(4)
+    else:
+        # Use standard RSWS (PyMuPDF with per-word formatting)
+        refs = type_into_word(doc, pages)
+        format_like_human(refs)
 
-    t3 = time.time()
-    format_like_human(refs)
-    format_time = time.time() - t3
+    type_time = time.time() - t2
 
     output_filename = f"{uuid.uuid4()}.docx"
     output_path = os.path.join(output_dir, output_filename)
     doc.save(output_path)
 
-    total_text = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
-
-    # Check for garbled text (broken ToUnicode CMap)
-    all_text = ''.join(w.text for p in pages for l in p.lines for w in l.words)
-    garbled_info = check_garbled(all_text)
-    if garbled_info['garbled']:
-        print(f"  [!] Garbled text detected: {garbled_info['ratio']*100:.2f}% suspicious chars ({garbled_info['count']})", file=sys.stderr)
+    total_text = sum(len(w.text) for p in pages for l in p.lines for w in l.words) if not smart_text else len(smart_text)
 
     result = {
         'outputPath': output_path.replace('\\', '/'),
         'outputFileName': output_filename,
         'pageCount': len(pages),
         'textLength': total_text,
-        'method': 'rsws',
-        'textGarbled': garbled_info['garbled'],
-        'garbledDetails': f"{garbled_info['ratio']*100:.1f}% suspicious chars",
+        'method': used_method,
+        'textGarbled': is_garbled,
+        'garbledDetails': f"{garbled_info['count']} suspicious chars, {repl_count} replacement" if is_garbled else 'clean',
         'timing': {
             'extract': round(extract_time, 2),
             'type': round(type_time, 2),
-            'format': round(format_time, 2),
+            'format': 0 if smart_text else round(time.time() - t2 - type_time, 2),
             'total': round(time.time() - t0, 2),
         }
     }
 
-    # If garbled, still save but flag it — caller can fall through
     return json.dumps(result)
 
 

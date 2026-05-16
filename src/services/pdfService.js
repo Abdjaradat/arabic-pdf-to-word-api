@@ -268,13 +268,16 @@ function isGarbled(text) {
     [0x0F00, 0x0FFF],  // Tibetan
   ];
   let suspicious = 0;
+  let replacement = 0;
   for (const ch of text) {
     const cp = ch.charCodeAt(0);
+    if (cp === 0xFFFD) { replacement++; continue; }
     for (const [lo, hi] of suspiciousRanges) {
       if (cp >= lo && cp <= hi) { suspicious++; break; }
     }
   }
-  return suspicious / Math.max(text.length, 1) > 0.005;
+  const len = Math.max(text.length, 1);
+  return (suspicious / len > 0.005) || (replacement / len > 0.01);
 }
 
 function isArabicText(text) {
