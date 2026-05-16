@@ -254,6 +254,29 @@ function countPdfPages(inputPath) {
   return 1;
 }
 
+// ── Garbled text detection ──
+// Detect broken ToUnicode CMap by checking for impossible chars
+function isGarbled(text) {
+  if (!text || text.length === 0) return false;
+  const suspiciousRanges = [
+    [0x0180, 0x024F],  // Latin Extended-B
+    [0x0250, 0x02AF],  // IPA Extensions
+    [0x0700, 0x074F],  // Syriac
+    [0x0780, 0x07BF],  // Thaana
+    [0x0900, 0x097F],  // Devanagari
+    [0x0E80, 0x0EFF],  // Lao
+    [0x0F00, 0x0FFF],  // Tibetan
+  ];
+  let suspicious = 0;
+  for (const ch of text) {
+    const cp = ch.charCodeAt(0);
+    for (const [lo, hi] of suspiciousRanges) {
+      if (cp >= lo && cp <= hi) { suspicious++; break; }
+    }
+  }
+  return suspicious / Math.max(text.length, 1) > 0.005;
+}
+
 function isArabicText(text) {
   const arabicPattern = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
   let arabicCount = 0;
@@ -491,9 +514,10 @@ async function convertWithRSWS(inputPath, outputDir) {
 
   const pageCount = countPdfPages(inputPath);
   const stats = fs.statSync(outputPath);
+  const garbled = isGarbled(readResult.text);
 
   console.log(`RSWS: Done → ${outputFileName}`);
-  return {
+  const result = {
     outputPath,
     outputFileName,
     pageCount,
@@ -501,6 +525,11 @@ async function convertWithRSWS(inputPath, outputDir) {
     method: 'rsws',
     outputFileSize: stats.size,
   };
+  if (garbled) {
+    result.textGarbled = true;
+    result.garbledDetails = 'Suspicious chars detected in pdftotext output';
+  }
+  return result;
 }
 
 // ── Recursive RSWS: RSWS → Word → PDF → RSWS → ... × N ──
@@ -602,12 +631,25 @@ async function convertPdfToWord(inputPath, outputDir, language = 'ara', quality 
   // 1. Python PyMuPDF RSWS (سريع — 2-5 ثواني)
   console.log('Trying Python RSWS converter (PyMuPDF)...');
   const pyResult = convertWithPython(inputPath, outputDir);
-  if (pyResult) return pyResult;
+  if (pyResult) {
+    // Check for garbled text (broken ToUnicode CMap)
+    if (pyResult.textGarbled) {
+      console.warn(`Python RSWS output garbled (${pyResult.garbledDetails || 'unknown'}) — falling through`);
+    } else {
+      return pyResult;
+    }
+  }
 
   // 2. Node.js RSWS (pdftotext)
   console.log('Trying Node.js RSWS converter (pdftotext)...');
   const rsws = await convertWithRSWS(inputPath, outputDir);
-  if (rsws) return rsws;
+  if (rsws) {
+    if (rsws.textGarbled) {
+      console.warn(`Node.js RSWS output garbled (${rsws.garbledDetails}) — falling through`);
+    } else {
+      return rsws;
+    }
+  }
 
   // 3. Azure AI
   const azure = await convertWithAzure(inputPath, outputDir);

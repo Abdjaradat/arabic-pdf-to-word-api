@@ -87,6 +87,39 @@ def has_arabic(text: str) -> bool:
     return any(lo <= ord(c) <= hi for lo, hi in ARABIC_RANGES for c in text)
 
 
+# ── Garbled text detection ──
+# Some Arabic PDFs use CID fonts with broken ToUnicode CMap,
+# producing wrong characters (e.g. IPA Extensions, Syriac, Latin-Ext).
+# Detect this by checking for characters in non-Arabic/Latin blocks.
+
+SUSPICIOUS_BLOCKS = [
+    (0x0180, 0x024F, 'Latin Extended-B'),
+    (0x0250, 0x02AF, 'IPA Extensions'),
+    (0x0700, 0x074F, 'Syriac'),
+    (0x0780, 0x07BF, 'Thaana'),
+    (0x0900, 0x097F, 'Devanagari'),
+    (0x0D00, 0x0D7F, 'Malayalam'),
+    (0x0E80, 0x0EFF, 'Lao'),
+    (0x0F00, 0x0FFF, 'Tibetan'),
+    (0x1000, 0x109F, 'Myanmar'),
+]
+
+def check_garbled(text: str) -> dict:
+    """Check if extracted text has garbled Unicode from broken ToUnicode map."""
+    if not text:
+        return {'garbled': False, 'ratio': 0.0}
+    total = max(len(text), 1)
+    suspicious = 0
+    for c in text:
+        cp = ord(c)
+        for lo, hi, _ in SUSPICIOUS_BLOCKS:
+            if lo <= cp <= hi:
+                suspicious += 1
+                break
+    ratio = suspicious / total
+    return {'garbled': ratio > 0.005, 'ratio': round(ratio, 4), 'count': suspicious}
+
+
 def set_rtl(paragraph):
     pPr = paragraph._element.get_or_add_pPr()
     bidi = OxmlElement('w:bidi')
@@ -412,19 +445,30 @@ def convert_pdf_to_word(input_path: str, output_dir: str) -> str:
 
     total_text = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
 
-    return json.dumps({
+    # Check for garbled text (broken ToUnicode CMap)
+    all_text = ''.join(w.text for p in pages for l in p.lines for w in l.words)
+    garbled_info = check_garbled(all_text)
+    if garbled_info['garbled']:
+        print(f"  [!] Garbled text detected: {garbled_info['ratio']*100:.2f}% suspicious chars ({garbled_info['count']})", file=sys.stderr)
+
+    result = {
         'outputPath': output_path.replace('\\', '/'),
         'outputFileName': output_filename,
         'pageCount': len(pages),
         'textLength': total_text,
         'method': 'rsws',
+        'textGarbled': garbled_info['garbled'],
+        'garbledDetails': f"{garbled_info['ratio']*100:.1f}% suspicious chars",
         'timing': {
             'extract': round(extract_time, 2),
             'type': round(type_time, 2),
             'format': round(format_time, 2),
             'total': round(time.time() - t0, 2),
         }
-    })
+    }
+
+    # If garbled, still save but flag it — caller can fall through
+    return json.dumps(result)
 
 
 # ── Built-in 100-iteration optimizer ──
