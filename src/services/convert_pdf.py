@@ -65,6 +65,10 @@ class LineInfo:
     has_arabic: bool
     y: float
     x: float
+    indent: float = 0
+    line_height: float = 12
+    space_before: float = 0
+    space_after: float = 4
 
 @dataclass
 class PageInfo:
@@ -386,12 +390,27 @@ def extract_from_pdf(pdf_path: str) -> List[PageInfo]:
                 else:
                     alignment = 'justify'
 
+            # Calculate line height from word bboxes
+            # line stores (word, wx0, wy0, wx1, wy1, font_info)
+            tops = [x[2] for x in line]  # wy0 (y0 = x[1] in raw word, but we store as index 2)
+            bottoms = [x[4] for x in line]  # wy1 (y1 = x[3] in raw word, but we store as index 4)
+            line_height_val = (max(bottoms) - min(tops)) if bottoms else 12
+
+            # Indent is the x-offset from page left edge
+            indent_val = first_x / pw  # normalized 0-1
+
+            # Space before/after calculated from line gaps
+            space_before_val = 0
+
             lines_info.append(LineInfo(
                 words=line_words_info,
                 alignment=alignment,
                 has_arabic=line_has_arabic,
                 y=line[0][2],
                 x=first_x,
+                indent=indent_val,
+                line_height=line_height_val,
+                space_before=space_before_val,
             ))
 
         pages.append(PageInfo(lines=lines_info, images=images_info))
@@ -408,11 +427,38 @@ def type_into_word(doc: Document, pages: List[PageInfo]) -> List:
     refs = []
 
     for page_idx, page in enumerate(pages):
+        prev_y = None
         for line in page.lines:
             p = doc.add_paragraph()
+            
+            # Line spacing based on font size (more reliable than bbox)
+            avg_size = sum(w.size for w in line.words) / max(len(line.words), 1)
+            if avg_size >= 14:
+                p.paragraph_format.line_spacing = 1.5
+            elif avg_size >= 10:
+                p.paragraph_format.line_spacing = 1.3
+            else:
+                p.paragraph_format.line_spacing = 1.0
+
+            # Space before: gap from previous line
+            if prev_y is not None:
+                gap = line.y - prev_y
+                if gap > line.line_height * 1.3:
+                    p.paragraph_format.space_before = Pt(max(0, gap - line.line_height))
+                else:
+                    p.paragraph_format.space_before = Pt(0)
+            else:
+                p.paragraph_format.space_before = Pt(0)
             p.paragraph_format.space_after = Pt(4)
-            p.paragraph_format.space_before = Pt(2)
-            p.paragraph_format.line_spacing = 1.2
+            
+            # Indentation (only for LEFT/RIGHT aligned, not CENTER)
+            if line.alignment in ('left', 'right') and line.indent > 0.03:
+                p.paragraph_format.left_indent = Inches(line.indent * 6.0)
+
+            # Update prev_y
+            if line.words:
+                prev_y = line.y
+
             for word in line.words:
                 run = p.add_run(word.text)
                 refs.append((p, run, word, line))
@@ -772,18 +818,75 @@ def detect_from_ocr(original_pdf: str, pages: List[PageInfo]) -> dict:
         return {}
 
 
+def compare_with_original(original_pdf: str, docx_path: str) -> dict:
+    """
+    COMPARE: extract text from BOTH original PDF and output DOCX,
+    find SUSPICIOUS characters in the original and look up what
+    the DOCX has at the same position.
+    Returns {garbled_char: correct_char} mapping.
+    """
+    try:
+        # Extract from original PDF (raw PyMuPDF)
+        pdf = fitz.open(original_pdf)
+        orig_pages = [page.get_text("text") for page in pdf]
+        pdf.close()
+
+        # Extract from DOCX
+        doc = Document(docx_path)
+        docx_lines = [p.text for p in doc.paragraphs]
+
+        mapping = {}
+        orig_all = '\n'.join(orig_pages)
+        docx_all = '\n'.join(docx_lines)
+
+        # Only care about suspicious chars in original PDF
+        for i, oc in enumerate(orig_all):
+            cp = ord(oc)
+            is_suspicious = any(lo <= cp <= hi for lo, hi, _ in SUSPICIOUS_BLOCKS)
+            if is_suspicious and i < len(docx_all):
+                dc = docx_all[i]
+                if oc != dc and dc.strip():
+                    mapping[oc] = dc
+
+        if mapping:
+            print(f"  COMPARE: {len(mapping)} garbled→correct mappings", file=sys.stderr)
+            for k, v in list(mapping.items())[:5]:
+                print(f"    U+{ord(k):04X} ({k}) → U+{ord(v):04X} ({v})", file=sys.stderr)
+        else:
+            # Verify no suspicious chars remain
+            pdf2 = fitz.open(original_pdf)
+            full = '\n'.join(page.get_text("text") for page in pdf2)
+            pdf2.close()
+            remaining = sum(1 for c in full if any(lo <= ord(c) <= hi for lo, hi, _ in SUSPICIOUS_BLOCKS))
+            if remaining == 0:
+                print(f"  COMPARE: original PDF has 0 garbled — all clean ✓", file=sys.stderr)
+            else:
+                print(f"  COMPARE: {remaining} garbled in original but mapping empty — skipping", file=sys.stderr)
+        return mapping
+    except Exception as e:
+        print(f"  COMPARE error: {e}", file=sys.stderr)
+        return {}
+
+
 def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> str:
     """
-    RSWS recursive with DETECT & CORRECT loop:
-      READ → FIX (GARBLED_MAP) → DETECT → CORRECT (OCR) → LOOP → WRITE → STYLE → CONVERT
+    RSWS recursive with COMPARE loop:
+      اقرا → احفظ → اكتب → نسق → قارن مع الاصلي → صحح → ارجع
+      READ → STORE → WRITE → STYLE → COMPARE(WITH_ORIGINAL) → CORRECT → LOOP
 
-    يقرا الـ PDF → يطبق GARBLED_MAP → يكتشف البقية → يصحح (OCR) → يكرر → يكتب Word → يحوله PDF
+    Each iteration:
+      1. READ from current PDF → extract words + formatting
+      2. STORE in PageInfo/WordInfo dataclasses
+      3. WRITE DOCX with current text
+      4. STYLE with RTL + fonts
+      5. COMPARE output DOCX text vs original PDF text
+      6. CORRECT differences (apply GARBLED_MAP + new mappings)
+      7. LOOP with corrected text (next pass produces better DOCX)
     """
     final_word = None
     loop_dir = os.path.join(output_dir, '_recursive_loop')
     os.makedirs(loop_dir, exist_ok=True)
 
-    # Load current GARBLED_MAP from text_reader if available
     garbled_map = {}
     if HAS_TEXT_READER:
         try:
@@ -792,13 +895,14 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
         except ImportError:
             pass
 
-    print(f"Recursive RSWS (DETECT+CORRECT): {iterations} iterations", file=sys.stderr)
+    print(f"Recursive RSWS (COMPARE loop): {iterations} iterations", file=sys.stderr)
     print(f"  Input: {input_pdf}", file=sys.stderr)
     print(f"  Initial GARBLED_MAP entries: {len(garbled_map)}", file=sys.stderr)
 
     errors_streak = 0
+    # current_pdf always starts from original (we always compare against original)
     current_pdf = input_pdf
-    new_mappings_found = False
+    global_corrected = {}  # accumulated corrections across iterations
 
     for i in range(iterations):
         t0 = time.time()
@@ -807,72 +911,26 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
         iter_pdf = os.path.join(loop_dir, f"iter_{iter_tag}.pdf") if i < iterations - 1 else None
 
         try:
-            # STEP 1: READ — extract text from PDF
+            #═══════════════════════════════════════════════
+            # STEP 1: READ → extract from current PDF
+            #═══════════════════════════════════════════════
             pages = extract_from_pdf(current_pdf)
 
-            # STEP 2: FIX — apply GARBLED_MAP on all words
-            if HAS_TEXT_READER:
+            # Apply accumulated corrections from previous iterations
+            if global_corrected and HAS_TEXT_READER:
                 from text_reader import normalize_arabic
                 for page in pages:
                     for line in page.lines:
                         for word in line.words:
-                            old_text = word.text
+                            old = word.text
                             word.text = normalize_arabic(word.text)
-                            # Track if new mapping was applied
-                            if old_text != word.text:
-                                new_mappings_found = True
+                            # Also apply any new corrections found in comparison
+                            for gc, cc in global_corrected.items():
+                                word.text = word.text.replace(gc, cc)
 
-            # STEP 3: DETECT — check for remaining garbled chars
-            remaining = detect_remaining_garbled(pages)
-            if remaining:
-                print(f"  [{iter_tag}/{iterations}] DETECT: {len(remaining)} garbled chars remain — trying OCR correct", file=sys.stderr)
-                # STEP 3b: CORRECT — use OCR to build new mappings
-                ocr_map = detect_from_ocr(input_pdf, pages)
-                if ocr_map:
-                    print(f"  [✓] OCR found {len(ocr_map)} new mappings", file=sys.stderr)
-                    # Apply new mappings directly on words
-                    for page in pages:
-                        for line in page.lines:
-                            for word in line.words:
-                                for gc, cc in ocr_map.items():
-                                    word.text = word.text.replace(gc, cc)
-                    remaining2 = detect_remaining_garbled(pages)
-                    if remaining2:
-                        print(f"  [!] {len(remaining2)} still garbled after OCR", file=sys.stderr)
-                    else:
-                        print(f"  [✓] All garbled fixed after OCR correct!", file=sys.stderr)
-                else:
-                    print(f"  [!] OCR returned no mappings — continuing", file=sys.stderr)
-            else:
-                print(f"  [{iter_tag}/{iterations}] DETECT: all clean ✓", file=sys.stderr)
-
-                # STEP 6: WRITE + STYLE — generate final DOCX and CONVERT
-                doc = Document()
-                section = doc.sections[0]
-                section.page_width = Cm(21.0); section.page_height = Cm(29.7)
-                section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
-                section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
-                refs = type_into_word(doc, pages)
-                format_like_human(refs)
-                doc.save(iter_word)
-
-                word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
-                final_word = iter_word
-                pdf_result = None
-
-                # STEP 5: CONVERT → PDF
-                if i < iterations - 1:
-                    pdf_result = word_to_pdf(iter_word, loop_dir)
-                    if pdf_result and os.path.exists(pdf_result):
-                        current_pdf = pdf_result
-
-                elapsed = time.time() - t0
-                pdf_ok = (i == iterations - 1) or (pdf_result and os.path.exists(pdf_result))
-                print(f"  [{iter_tag}/{iterations}] ✓ words={word_count:>5} "
-                      f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'}", file=sys.stderr)
-                continue
-
-            # STEP 4: LOOP — if garbled remains, apply OCR mapping and regenerate DOCX → PDF
+            #═══════════════════════════════════════════════
+            # STEP 2+3: STORE + WRITE + STYLE → DOCX
+            #═══════════════════════════════════════════════
             doc = Document()
             section = doc.sections[0]
             section.page_width = Cm(21.0); section.page_height = Cm(29.7)
@@ -881,23 +939,57 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
             refs = type_into_word(doc, pages)
             format_like_human(refs)
             doc.save(iter_word)
-
-            word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
             errors_streak = 0
             final_word = iter_word
-            pdf_result = None
 
-            # Convert to PDF for next iteration
+            word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
+
+            #═══════════════════════════════════════════════
+            # STEP 5: COMPARE output DOCX vs original PDF
+            #═══════════════════════════════════════════════
+            # Skip compare if previous iteration had 0 garbled and mapping is stable
+            all_text_docx = ' '.join(p.text for p in doc.paragraphs)
+            garbled_in_docx = detect_remaining_garbled(
+                [PageInfo(lines=[LineInfo(words=[WordInfo(text=all_text_docx, font='', size=0, bold=False, italic=False, color=(0,0,0))], alignment='', has_arabic=False, y=0, x=0)], images=[])]
+            )
+            
+            diff = {}
+            if garbled_in_docx:
+                # Only compare if DOCX still has garbled chars
+                diff = compare_with_original(input_pdf, iter_word)
+            else:
+                print(f"  [{iter_tag}/{iterations}] COMPARE: skipped — DOCX already clean ✓", file=sys.stderr)
+
+            #═══════════════════════════════════════════════
+            # STEP 6: CORRECT — build mapping from differences
+            #═══════════════════════════════════════════════
+            if diff:
+                print(f"  [{iter_tag}/{iterations}] CORRECT: {len(diff)} corrections to apply", file=sys.stderr)
+                global_corrected.update(diff)
+                still_bad = detect_remaining_garbled(pages)
+                if still_bad:
+                    print(f"  [{iter_tag}/{iterations}] {len(still_bad)} chars still suspicious — OCR detect", file=sys.stderr)
+                    ocr_map = detect_from_ocr(input_pdf, pages)
+                    if ocr_map:
+                        print(f"  OCR found {len(ocr_map)} extra mappings", file=sys.stderr)
+                        global_corrected.update(ocr_map)
+
+            #═══════════════════════════════════════════════
+            # CONVERT to PDF for next iteration
+            #═══════════════════════════════════════════════
+            pdf_result = None
+            pdf_ok = True
             if i < iterations - 1:
                 pdf_result = word_to_pdf(iter_word, loop_dir)
                 if pdf_result and os.path.exists(pdf_result):
                     current_pdf = pdf_result
+                else:
+                    pdf_ok = False
 
             elapsed = time.time() - t0
-            pdf_ok = (i == iterations - 1) or (pdf_result and os.path.exists(pdf_result))
-            print(f"  [{iter_tag}/{iterations}] → words={word_count:>5} "
-                  f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'} "
-                  f"remaining={len(remaining) if 'remaining' in dir() else 0}", file=sys.stderr)
+            status = '✓' if not diff else '→'
+            print(f"  [{iter_tag}/{iterations}] {status} words={word_count:>5} "
+                  f"diff={len(diff):>3} time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'}", file=sys.stderr)
 
         except Exception as e:
             errors_streak += 1
@@ -909,6 +1001,7 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
 
     print(f"\nRecursive RSWS done! ({iterations} iterations)", file=sys.stderr)
     print(f"Final output: {final_word}", file=sys.stderr)
+    print(f"Total corrections accumulated: {len(global_corrected)}", file=sys.stderr)
 
     if final_word and os.path.exists(final_word):
         final_name = f"rsws_recursive_{uuid.uuid4().hex[:8]}.docx"
