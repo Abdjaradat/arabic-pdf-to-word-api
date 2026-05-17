@@ -6,7 +6,9 @@ WORKDIR /app
 # poppler-utils (pdftotext) للاستخراج الأساسي
 # tesseract-ocr للتعرف على النص في الصور
 # Python + PyMuPDF للتحويل المتقدم
-RUN apt-get update && \
+# Enable non-free repo for tesseract-ocr-ara
+RUN sed -i 's/main/main contrib non-free/g' /etc/apt/sources.list && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       poppler-utils \
       libreoffice-writer \
