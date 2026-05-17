@@ -19,9 +19,9 @@ RUN apt-get update && \
       && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python libraries
-RUN pip3 install PyMuPDF==1.24.9 python-docx==1.1.2 --break-system-packages
-RUN pip3 install pdf2image pytesseract pdfplumber pypdf --break-system-packages
+# Install Python libraries (allow failure — PDF backends optional)
+RUN python3 -m pip install PyMuPDF==1.24.9 python-docx==1.1.2 --break-system-packages 2>&1 || echo 'WARN: PyMuPDF install failed (non-fatal)'
+RUN python3 -m pip install pdf2image pytesseract pdfplumber pypdf --break-system-packages 2>&1 || echo 'WARN: extra PDF backends failed (non-fatal)'
 
 COPY package*.json ./
 RUN npm install --omit=dev
