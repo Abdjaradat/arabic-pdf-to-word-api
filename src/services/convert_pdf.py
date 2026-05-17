@@ -716,21 +716,89 @@ def word_to_pdf(docx_path: str, output_dir: str) -> str:
     return None
 
 
+def detect_remaining_garbled(pages: List[PageInfo]) -> dict:
+    """
+    DETECT: find garbled chars that survived GARBLED_MAP fix.
+    Returns {garbled_char: suggested_method}
+    """
+    remaining = {}
+    for page in pages:
+        for line in page.lines:
+            for word in line.words:
+                for c in word.text:
+                    cp = ord(c)
+                    # Check if still in suspicious blocks
+                    for lo, hi, name in SUSPICIOUS_BLOCKS:
+                        if lo <= cp <= hi:
+                            remaining[c] = 'needs_ocr'
+                            break
+                    if cp == 0xFFFD:
+                        remaining[c] = 'needs_ocr'
+    return remaining
+
+
+def detect_from_ocr(original_pdf: str, pages: List[PageInfo]) -> dict:
+    """
+    Use Tesseract OCR on the original PDF to find correct chars for garbled ones.
+    Compares OCR text with PyMuPDF text at the PAGE level to build GARBLED_MAP.
+    Returns {garbled_char: correct_char}
+    """
+    if not HAS_TEXT_READER:
+        return {}
+    try:
+        from text_reader import extract_ocr_tesseract
+        ocr_result = extract_ocr_tesseract(original_pdf)
+        if not ocr_result.get('text'):
+            return {}
+        ocr_text = ocr_result['text']
+        # Get PyMuPDF raw text
+        pdf = fitz.open(original_pdf)
+        pymu_text = '\n'.join(page.get_text("text") for page in pdf)
+        pdf.close()
+
+        mapping = {}
+        # Find garbled chars in PyMuPDF text, look for same position in OCR text
+        pymu_lines = pymu_text.split('\n')
+        ocr_lines = ocr_text.split('\n')
+        for pl, ol in zip(pymu_lines, ocr_lines):
+            for pc, oc in zip(pl, ol):
+                cp = ord(pc)
+                is_suspicious = any(lo <= cp <= hi for lo, hi, _ in SUSPICIOUS_BLOCKS)
+                if is_suspicious and pc != oc and ord(oc) < 128:
+                    mapping[pc] = oc
+        return mapping
+    except Exception as e:
+        print(f"  [!] OCR detect error: {e}", file=sys.stderr)
+        return {}
+
+
 def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> str:
     """
-    Run RSWS recursively: RSWS → Word → PDF → RSWS → Word → PDF → ... × iterations
-    يقرا الـ PDF → يحفظ الكلمات → يكتب Word → يحوله PDF → يعيد الكرة 100 مرة
+    RSWS recursive with DETECT & CORRECT loop:
+      READ → FIX (GARBLED_MAP) → DETECT → CORRECT (OCR) → LOOP → WRITE → STYLE → CONVERT
+
+    يقرا الـ PDF → يطبق GARBLED_MAP → يكتشف البقية → يصحح (OCR) → يكرر → يكتب Word → يحوله PDF
     """
-    current_pdf = input_pdf
     final_word = None
     loop_dir = os.path.join(output_dir, '_recursive_loop')
     os.makedirs(loop_dir, exist_ok=True)
 
-    print(f"Recursive RSWS: {iterations} iterations starting...", file=sys.stderr)
+    # Load current GARBLED_MAP from text_reader if available
+    garbled_map = {}
+    if HAS_TEXT_READER:
+        try:
+            from text_reader import GARBLED_MAP as gm
+            garbled_map = dict(gm)
+        except ImportError:
+            pass
+
+    print(f"Recursive RSWS (DETECT+CORRECT): {iterations} iterations", file=sys.stderr)
     print(f"  Input: {input_pdf}", file=sys.stderr)
-    print(f"  Loop dir: {loop_dir}", file=sys.stderr)
+    print(f"  Initial GARBLED_MAP entries: {len(garbled_map)}", file=sys.stderr)
 
     errors_streak = 0
+    current_pdf = input_pdf
+    new_mappings_found = False
 
     for i in range(iterations):
         t0 = time.time()
@@ -739,8 +807,72 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
         iter_pdf = os.path.join(loop_dir, f"iter_{iter_tag}.pdf") if i < iterations - 1 else None
 
         try:
-            # STEP 1: RSWS → Word (اقرا → احفظ → اكتب → نسق)
+            # STEP 1: READ — extract text from PDF
             pages = extract_from_pdf(current_pdf)
+
+            # STEP 2: FIX — apply GARBLED_MAP on all words
+            if HAS_TEXT_READER:
+                from text_reader import normalize_arabic
+                for page in pages:
+                    for line in page.lines:
+                        for word in line.words:
+                            old_text = word.text
+                            word.text = normalize_arabic(word.text)
+                            # Track if new mapping was applied
+                            if old_text != word.text:
+                                new_mappings_found = True
+
+            # STEP 3: DETECT — check for remaining garbled chars
+            remaining = detect_remaining_garbled(pages)
+            if remaining:
+                print(f"  [{iter_tag}/{iterations}] DETECT: {len(remaining)} garbled chars remain — trying OCR correct", file=sys.stderr)
+                # STEP 3b: CORRECT — use OCR to build new mappings
+                ocr_map = detect_from_ocr(input_pdf, pages)
+                if ocr_map:
+                    print(f"  [✓] OCR found {len(ocr_map)} new mappings", file=sys.stderr)
+                    # Apply new mappings directly on words
+                    for page in pages:
+                        for line in page.lines:
+                            for word in line.words:
+                                for gc, cc in ocr_map.items():
+                                    word.text = word.text.replace(gc, cc)
+                    remaining2 = detect_remaining_garbled(pages)
+                    if remaining2:
+                        print(f"  [!] {len(remaining2)} still garbled after OCR", file=sys.stderr)
+                    else:
+                        print(f"  [✓] All garbled fixed after OCR correct!", file=sys.stderr)
+                else:
+                    print(f"  [!] OCR returned no mappings — continuing", file=sys.stderr)
+            else:
+                print(f"  [{iter_tag}/{iterations}] DETECT: all clean ✓", file=sys.stderr)
+
+                # STEP 6: WRITE + STYLE — generate final DOCX and CONVERT
+                doc = Document()
+                section = doc.sections[0]
+                section.page_width = Cm(21.0); section.page_height = Cm(29.7)
+                section.top_margin = Cm(2.0); section.bottom_margin = Cm(2.0)
+                section.left_margin = Cm(2.0); section.right_margin = Cm(2.0)
+                refs = type_into_word(doc, pages)
+                format_like_human(refs)
+                doc.save(iter_word)
+
+                word_count = sum(len(w.text) for p in pages for l in p.lines for w in l.words)
+                final_word = iter_word
+                pdf_result = None
+
+                # STEP 5: CONVERT → PDF
+                if i < iterations - 1:
+                    pdf_result = word_to_pdf(iter_word, loop_dir)
+                    if pdf_result and os.path.exists(pdf_result):
+                        current_pdf = pdf_result
+
+                elapsed = time.time() - t0
+                pdf_ok = (i == iterations - 1) or (pdf_result and os.path.exists(pdf_result))
+                print(f"  [{iter_tag}/{iterations}] ✓ words={word_count:>5} "
+                      f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'}", file=sys.stderr)
+                continue
+
+            # STEP 4: LOOP — if garbled remains, apply OCR mapping and regenerate DOCX → PDF
             doc = Document()
             section = doc.sections[0]
             section.page_width = Cm(21.0); section.page_height = Cm(29.7)
@@ -755,24 +887,21 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
             final_word = iter_word
             pdf_result = None
 
-            # STEP 2: Word → PDF (للوجة القادمة)
+            # Convert to PDF for next iteration
             if i < iterations - 1:
                 pdf_result = word_to_pdf(iter_word, loop_dir)
                 if pdf_result and os.path.exists(pdf_result):
                     current_pdf = pdf_result
-                else:
-                    # PDF conversion failed — use same PDF, RSWS will be similar
-                    pass
 
             elapsed = time.time() - t0
-            status = "✓" if i == iterations - 1 else "→"
             pdf_ok = (i == iterations - 1) or (pdf_result and os.path.exists(pdf_result))
-            print(f"  [{iter_tag}/{iterations}] {status} words={word_count:>5} "
-                  f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'}", file=sys.stderr)
+            print(f"  [{iter_tag}/{iterations}] → words={word_count:>5} "
+                  f"time={elapsed:.2f}s PDF={'ok' if pdf_ok else 'skip'} "
+                  f"remaining={len(remaining) if 'remaining' in dir() else 0}", file=sys.stderr)
 
         except Exception as e:
             errors_streak += 1
-            print(f"  [{iter_tag}/{iterations}] X ERROR: {str(e)[:60]}", file=sys.stderr)
+            print(f"  [{iter_tag}/{iterations}] X ERROR: {str(e)[:120]}", file=sys.stderr)
             if errors_streak >= 3:
                 print(f"  Stopping: {errors_streak} consecutive errors", file=sys.stderr)
                 break
@@ -781,7 +910,6 @@ def recursive_rsws(input_pdf: str, output_dir: str, iterations: int = 100) -> st
     print(f"\nRecursive RSWS done! ({iterations} iterations)", file=sys.stderr)
     print(f"Final output: {final_word}", file=sys.stderr)
 
-    # Copy final word to output_dir with clean name
     if final_word and os.path.exists(final_word):
         final_name = f"rsws_recursive_{uuid.uuid4().hex[:8]}.docx"
         final_path = os.path.join(output_dir, final_name)
